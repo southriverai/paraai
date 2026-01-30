@@ -1,0 +1,93 @@
+[tool.poetry]
+name = "paraai"
+version = "0.1.0"
+description = ""
+authors = ["Jaap Oosterbroek <jaap.oosterbroek@gmail.com>"]
+readme = "README.md"
+packages = [{include = "paraai"}]
+
+[[tool.poetry.source]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+priority = "explicit"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.15"
+langchain-openai = "^0.1.0"
+langchain-core = "^0.2.0"
+requests = "^2.32.5"
+pydantic = "^2.0.0"
+matplotlib = "^3.10.8"
+scikit-learn = "^1.8.0"
+torch = { version = "2.5.1+cu121", source = "pytorch-cu121" }
+torchvision = { version = "0.20.1+cu121", source = "pytorch-cu121" }
+torchaudio = { version = "2.5.1+cu121", source = "pytorch-cu121" }
+pandas = "^3.0.0"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.1.0"
+
+
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+# Enable a comprehensive set of linting rules
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort (import sorting)
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "ARG", # flake8-unused-arguments
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking
+    "PTH", # flake8-use-pathlib
+    "PD",  # pandas-vet
+    "PL",  # Pylint
+    "TRY", # tryceratops
+    "RUF", # Ruff-specific rules
+]
+ignore = [
+    # E501 is not ignored - we enforce 140 char limit via max-line-length
+    "PLR0913", # Too many arguments
+    "PLR0912", # Too many branches
+    "PLR0915", # Too many statements
+    "ARG002", #unused arguments
+    "TRY003" # long message in except block
+]
+
+# Set the maximum line length
+line-length = 140
+
+# Exclude common directories
+exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "*.egg-info",
+]
+
+[tool.ruff.format]
+# Use double quotes for strings
+quote-style = "double"
+# Use spaces for indentation
+indent-style = "space"
+# Respect magic trailing comma (don't skip them)
+skip-magic-trailing-comma = false
+
+[tool.ruff.lint.pycodestyle]
+# Set max-line-length for pycodestyle (E501) rule
+max-line-length = 140
+
+[tool.ruff.isort]
+# Use known-first-party for your package
+known-first-party = ["southriverblog"]
