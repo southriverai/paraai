@@ -2,7 +2,6 @@
 Generate training data for neural network policy.
 Predicts: If we leave the current thermal, will we find stronger lift?
 """
-from argparse import ArgumentParser, Namespace
 from pathlib import Path
 
 import numpy as np
@@ -67,6 +66,7 @@ def do_train_rl(
 def train_rl(
     experiment_id: str,
     hidden_sizes,
+    load_best_model: bool = True,
 ) -> None:
     model_path = Path("data", "experiments", experiment_id, "models", "neural_policy.pth")
 
@@ -75,7 +75,7 @@ def train_rl(
         hidden_sizes=hidden_sizes,
     )
     best_model_path = Path("data", "experiments", experiment_id, "best", "best_model.pth")
-    if best_model_path.exists():
+    if load_best_model and best_model_path.exists():
         # load best model
         policy.load_path_file(best_model_path)
 
@@ -102,8 +102,6 @@ def train_rl(
     )
 
 
-
-
 if __name__ == "__main__":
     repository = Repository.initialize()
 
@@ -115,9 +113,8 @@ if __name__ == "__main__":
     experiment_models_dir.mkdir(parents=True, exist_ok=True)
     experiment_best_dir.mkdir(parents=True, exist_ok=True)
 
-
     train_rl(
         experiment_id=experiment_id,
         hidden_sizes=hidden_sizes,
+        load_best_model=False,
     )
-

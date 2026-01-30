@@ -7,6 +7,7 @@ from paraai.experiment import ExperimentOutputBatch
 from paraai.flight_conditions import FlightConditionsDistribution
 from paraai.flight_policy import FlightPolicyAlwaysTermal, FlightPolicyBase, FlightPolicyNeverTermal, FlightPolicyThreeZones
 from paraai.model import AircraftModel
+from paraai.flight_policy_neural import FlightPolicyNeuralNetwork
 from paraai.simulator_crude import SimulatorCrude
 from paraai.tools_plot import get_statistics
 
@@ -26,6 +27,11 @@ def creat_table():
     flight_policies.append(FlightPolicyThreeZones(0.8, 0.3))
     flight_policies.append(FlightPolicyThreeZones(0.7, 0.1))
     flight_policies.append(FlightPolicyThreeZones(0.6, 0.0))
+    flight_policies.append(FlightPolicyNeuralNetwork(
+        model_path=Path("data", "experiments", "ex_32_16_1", "best", "best_model.pth"),
+        hidden_sizes=[32, 16],
+    ))
+
 
     policy_labels = [policy.policy_name for policy in flight_policies]
 

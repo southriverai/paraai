@@ -25,7 +25,7 @@ torchaudio = { version = "2.5.1+cu121", source = "pytorch-cu121" }
 pandas = "^3.0.0"
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.1.0"
+ruff = "^0.8.0"
 
 
 
@@ -90,4 +90,4 @@ max-line-length = 140
 
 [tool.ruff.isort]
 # Use known-first-party for your package
-known-first-party = ["southriverblog"]
+known-first-party = ["paraai"]

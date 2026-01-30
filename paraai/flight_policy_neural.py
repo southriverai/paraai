@@ -302,13 +302,7 @@ class FlightPolicyNeuralNetwork(FlightPolicyBase):
         plt.show()
 
     def save(self) -> None:
-        """Save model."""
-        print(f"Saving model to {self.model_path}")
-        # make sure partent dir exists
-        self.model_path.parent.mkdir(parents=True, exist_ok=True)
-        # save model
-        torch.save(self.network.state_dict(), self.model_path)
-        print(f"Model saved to {self.model_path}")
+        self.save_file(self.model_path)
 
     def save_file(self, path_file: Path) -> None:
         """Save model."""
@@ -323,7 +317,7 @@ class FlightPolicyNeuralNetwork(FlightPolicyBase):
         # Load weights if provided
         if path_file.exists():
             print(f"Loading model weights from {path_file}")
-            self.network.load_state_dict(torch.load(path_file, map_location="cpu"))
+            self.network.load_state_dict(torch.load(path_file, map_location="cuda", weights_only=True))
             # Set to evaluation mode
             self.network.eval()
         else:

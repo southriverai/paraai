@@ -26,6 +26,13 @@ poetry run pip install --index-url https://download.pytorch.org/whl/cu121 \
 python script/check_cuda.py
 ```
 
+## Linting / formatting
+To fix lint issues and format code (run from project root):
+```bash
+poetry run ruff check --fix .
+poetry run ruff format .
+```
+
 ## Running the expiriments
 I ship with 1 policy included, but if you want to train your own you can use.
 ```bash
