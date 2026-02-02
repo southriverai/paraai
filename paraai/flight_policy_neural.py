@@ -74,6 +74,7 @@ class FlightPolicyNeuralNetwork(FlightPolicyBase):
 
     def __init__(
         self,
+        policy_name: str,
         model_path: Path,
         hidden_sizes: list[int],
     ):
@@ -85,7 +86,7 @@ class FlightPolicyNeuralNetwork(FlightPolicyBase):
             hidden_sizes: List of hidden layer sizes
             dropout: Dropout probability
         """
-        super().__init__(policy_name="NeuralNetwork")
+        super().__init__(policy_name=policy_name)
 
         # Use default hidden sizes if not provided
         if hidden_sizes is None:
@@ -127,7 +128,10 @@ class FlightPolicyNeuralNetwork(FlightPolicyBase):
                 nn.init.ones_(module.weight)
                 nn.init.zeros_(module.bias)
 
-    def convert_to_matrixes(self, experiment_output_batch: ExperimentOutputBatch) -> tuple[np.ndarray, np.ndarray]:
+    def convert_to_matrixes(
+        self,
+        experiment_output_batch: ExperimentOutputBatch,
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Convert simulation results to matrixes."""
         list_input_array = []
         list_output_array = []

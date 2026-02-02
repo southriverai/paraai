@@ -54,7 +54,7 @@ select = [
     "RUF", # Ruff-specific rules
 ]
 ignore = [
-    # E501 is not ignored - we enforce 140 char limit via max-line-length
+    "E501",    # Line too long (disable line length warnings)
     "PLR0913", # Too many arguments
     "PLR0912", # Too many branches
     "PLR0915", # Too many statements

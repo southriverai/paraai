@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from paraai.flight_conditions import FlightConditionsDistribution
+from paraai.flight_conditions import FlightConditionsDistributionChoice
 from paraai.flight_policy_neural import FlightPolicyNeuralNetwork
 from paraai.model import AircraftModel
 from paraai.respository import Repository
@@ -41,7 +41,9 @@ def do_train_rl(
             best_distance = mean_distance
             policy.save_file(best_model_path)
         print(f"Mean distance: {mean_distance}")
-        input_matrix, output_matrix = policy.convert_to_matrixes(simulation_results)
+        input_matrix, output_matrix = policy.convert_to_matrixes(
+            simulation_results,
+        )
 
         input__tensor = torch.FloatTensor(input_matrix)
         output_tensor = torch.FloatTensor(output_matrix)
@@ -71,6 +73,7 @@ def train_rl(
     model_path = Path("data", "experiments", experiment_id, "models", "neural_policy.pth")
 
     policy = FlightPolicyNeuralNetwork(
+        policy_name="NeuralNetwork",
         model_path=model_path,
         hidden_sizes=hidden_sizes,
     )
@@ -83,9 +86,8 @@ def train_rl(
         velocity_max_m_s=10,
         sink_max_m_s=-1,
     )
-    flight_condition_distribution = FlightConditionsDistribution(
-        termal_net_climb_mean_min_m_s=0.5,
-        termal_net_climb_mean_max_m_s=4.0,
+    flight_condition_distribution = FlightConditionsDistributionChoice(
+        list_climbs_mean_m_s=[0.5],
     )
     simulator = SimulatorCrude(
         flight_condition_distribution=flight_condition_distribution,
@@ -95,9 +97,9 @@ def train_rl(
         policy,
         simulator,
         rollout_count=200,
-        simulations_per_rollout=1000,
+        simulations_per_rollout=2000,
         epochs_per_rollout=100,
-        learning_rate=0.002,
+        learning_rate=0.001,
         experiment_id=experiment_id,
     )
 
@@ -105,7 +107,7 @@ def train_rl(
 if __name__ == "__main__":
     repository = Repository.initialize()
 
-    experiment_id = "ex_32_16_1"
+    experiment_id = "ex_32_16_4"
     hidden_sizes = [32, 16]
     # Create experiment directories
     experiment_models_dir = Path("data", "experiments", experiment_id, "models")
@@ -116,5 +118,5 @@ if __name__ == "__main__":
     train_rl(
         experiment_id=experiment_id,
         hidden_sizes=hidden_sizes,
-        load_best_model=False,
+        load_best_model=True,
     )

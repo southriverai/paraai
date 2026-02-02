@@ -107,7 +107,7 @@ class FlightConditionsDistribution:
         take_off_altitude_m: float = 1000.0,
         landing_time_s: float = 3600.0 * 6,
         distance_max_m: float = 3600.0 * 6 * 10,
-        termal_ceiling_m: float = 4000.0,
+        termal_ceiling_m: float = 1000.0,
         termal_distance_min_m: float = 1000.0,
         termal_distance_mean_m: float = 2000.0,
         termal_distance_std_m: float = 1000.0,
@@ -128,6 +128,60 @@ class FlightConditionsDistribution:
     def sample(self) -> FlightConditions:
         """Sample a FlightConditions with thermal climb mean in [climb_min_m_s, climb_max_m_s]."""
         mean_m_s = np.random.uniform(self.termal_net_climb_mean_min_m_s, self.termal_net_climb_mean_max_m_s)
+        # Hardcoded for now
+        termal_net_climb_min_m_s = 0.20  # the frist termal should be at least 0.20 m/s to be considered a termal
+        termal_net_climb_max_m_s = 10.0
+        return FlightConditions(
+            take_off_time_s=self._take_off_time_s,
+            take_off_altitude_m=self._take_off_altitude_m,
+            landing_time_s=self._landing_time_s,
+            distance_max_m=self._distance_max_m,
+            termal_ceiling_m=self._termal_ceiling_m,
+            termal_net_climb_min_m_s=termal_net_climb_min_m_s,
+            termal_net_climb_mean_m_s=mean_m_s,
+            termal_net_climb_std_m_s=mean_m_s * 0.5,  # we want 95% of termals to be larger than 0
+            termal_net_climb_max_m_s=termal_net_climb_max_m_s,
+            termal_distance_min_m=self._termal_distance_min_m,
+            termal_distance_mean_m=self._termal_distance_mean_m,
+            termal_distance_std_m=self._termal_distance_std_m,
+            termal_distance_max_m=self._termal_distance_max_m,
+        )
+
+
+class FlightConditionsDistributionChoice:
+    """
+    Distribution over flight conditions. sample() returns FlightConditions
+    with thermal climb parameters drawn between climb_min_m_s and climb_max_m_s.
+    """
+
+    def __init__(
+        self,
+        list_climbs_mean_m_s: list[float],
+        *,
+        take_off_time_s: float = 0.0,
+        take_off_altitude_m: float = 1000.0,
+        landing_time_s: float = 3600.0 * 6,
+        distance_max_m: float = 3600.0 * 6 * 10,
+        termal_ceiling_m: float = 1000.0,
+        termal_distance_min_m: float = 1000.0,
+        termal_distance_mean_m: float = 2000.0,
+        termal_distance_std_m: float = 1000.0,
+        termal_distance_max_m: float = 10000.0,
+    ):
+        self.list_climbs_mean_m_s = list_climbs_mean_m_s
+        self._take_off_time_s = take_off_time_s
+        self._take_off_altitude_m = take_off_altitude_m
+        self._landing_time_s = landing_time_s
+        self._distance_max_m = distance_max_m
+        self._termal_ceiling_m = termal_ceiling_m
+        self._termal_distance_min_m = termal_distance_min_m
+        self._termal_distance_mean_m = termal_distance_mean_m
+        self._termal_distance_std_m = termal_distance_std_m
+        self._termal_distance_max_m = termal_distance_max_m
+
+    def sample(self) -> FlightConditions:
+        """Sample a FlightConditions with thermal climb mean in [climb_min_m_s, climb_max_m_s]."""
+        mean_m_s = np.random.choice(self.list_climbs_mean_m_s, size=1)[0]
         # Hardcoded for now
         termal_net_climb_min_m_s = 0.20  # the frist termal should be at least 0.20 m/s to be considered a termal
         termal_net_climb_max_m_s = 10.0

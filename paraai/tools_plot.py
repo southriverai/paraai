@@ -1,9 +1,11 @@
+from pathlib import Path
+from typing import Optional
+
 import matplotlib.pyplot as plt
 import numpy as np
 
 from paraai.experiment import ExperimentOutput, ExperimentOutputBatch
 from paraai.flight_conditions import FlightConditions
-from paraai.model import AircraftModel
 
 
 def get_statistics(experiment_output_batch: ExperimentOutputBatch):
@@ -28,7 +30,12 @@ def print_statistics(experiment_result_baches: list[ExperimentOutputBatch], labe
         print("p90 distance", stats["p90_distance"])
 
 
-def plot_flight_hists(experiment_result_baches: list[ExperimentOutputBatch], labels: list[str]):
+def plot_flight_hists(
+    experiment_result_baches: list[ExperimentOutputBatch],
+    labels: list[str],
+    path_file: Optional[Path] = None,
+    show: bool = False,
+):
     fig, axes = plt.subplots(2, 1, figsize=(12, 8))
     best_p50_policy_name = None
     best_p50_distance = 0
@@ -81,85 +88,61 @@ def plot_flight_hists(experiment_result_baches: list[ExperimentOutputBatch], lab
     # best p50 p
     print("best p50 policy", best_p50_policy_name)
     print("best p90 policy", best_p90_policy_name)
-    plt.show()
+    if show:
+        plt.show()
+    if path_file is not None:
+        path_file.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(path_file)
+        print(f"Flight hists plot saved to {path_file}")
 
 
-def plot_flight_hists_2(experiment_result_baches: list[ExperimentOutputBatch], labels: list[str]):
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+def plot_flight_hists_2(
+    experiment_result_baches: list[ExperimentOutputBatch],
+    labels: list[str],
+    path_file: Optional[Path] = None,
+    show: bool = False,
+):
+    fig, ax_distance = plt.subplots(1, 1, figsize=(12, 6))
 
     # First pass: collect all data to determine bin ranges
     all_distances_km = []
-    all_durations_s = []
     for experiment_output_batch in experiment_result_baches:
         for experiment_output in experiment_output_batch.list_experiment_outputs:
             all_distances_km.append(experiment_output.flight_state.list_distance_m[-1] / 1000.0)
-            all_durations_s.append(experiment_output.flight_state.list_time_s[-1])
 
     # Create bins based on all data
-    num_bins = 20
+    num_bins = 100
     _, distance_bins = np.histogram(all_distances_km, bins=num_bins)  # Get bin edges
-    _, duration_bins = np.histogram(all_durations_s, bins=num_bins)  # Get bin edges
 
     # Second pass: plot histograms using the same bins
+    flight_count = 0
     for experiment_output_batch, label in zip(experiment_result_baches, labels):
-        print(label)
         distances_km = []
-        durations_s = []
         for experiment_output in experiment_output_batch.list_experiment_outputs:
             distances_km.append(experiment_output.flight_state.list_distance_m[-1] / 1000.0)
-            durations_s.append(experiment_output.flight_state.list_time_s[-1])
-        average_distance = np.mean(distances_km)  # round to 2 decimal places
-        average_distance = round(average_distance, 2)
-        p90_distance = np.percentile(distances_km, 90)
-        p90_distance = round(p90_distance, 2)
-        print("average distance", average_distance)
-        print("p90 distance", p90_distance)
-        axes[0, 0].hist(
+        flight_count = len(distances_km)
+        ax_distance.hist(
             distances_km,
             bins=distance_bins,
             label=label,
             alpha=0.7,
         )
-        axes[0, 1].hist(
-            durations_s,
-            bins=duration_bins,
-            label=label,
-            alpha=0.7,
-        )
-    axes[0, 0].set_xlabel("Distance (km)")
-    axes[0, 0].set_ylabel("Frequency")
-    axes[0, 0].set_title("Distance Distribution")
-
-    axes[0, 1].set_xlabel("Duration (s)")
-    axes[0, 1].set_ylabel("Frequency")
-    axes[0, 1].set_title("Duration Distribution")
-    axes[0, 0].legend()
-    axes[0, 1].legend()
-
-    # Collect flight statuses for pie chart
-    status_counts = {}
-    for experiment_output_batch in experiment_result_baches:
-        for experiment_output in experiment_output_batch.list_experiment_outputs:
-            status = experiment_output.flight_state.status
-            status_counts[status] = status_counts.get(status, 0) + 1
-
-    # Create pie chart
-    statuses = list(status_counts.keys())
-    counts = list(status_counts.values())
-    # Use a more readable label format
-    labels_pie = [status.replace("_", " ").title() for status in statuses]
-    colors = plt.cm.Set3(np.linspace(0, 1, len(statuses)))
-    axes[1, 0].pie(counts, labels=labels_pie, autopct="%1.1f%%", startangle=90, colors=colors)
-    axes[1, 0].set_title("Flight Status Distribution")
-
-    # Hide the unused subplot
-    axes[1, 1].axis("off")
+    ax_distance.set_xlabel("Distance (km)")
+    ax_distance.set_ylabel("Frequency")
+    ax_distance.set_title(f"Distance histogram over {flight_count} flights")
+    ax_distance.legend()
 
     plt.tight_layout()
-    plt.show()
+    if show:
+        plt.show()
+    if path_file is not None:
+        path_file.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(path_file)
+        print(f"Flight hists plot saved to {path_file}")
 
 
 def plot_flight_hist(experiment_output: ExperimentOutput):
+    plt.figure(figsize=(12, 6))
     fig, axes = plt.subplots(2, 1, figsize=(12, 8))
     axes[0].hist(experiment_output.flight_state.list_distance_m, bins=20)
     axes[0].set_xlabel("Distance (km)")
@@ -175,6 +158,8 @@ def plot_flight_hist(experiment_output: ExperimentOutput):
 
 def plot_flight(
     experiment_result: ExperimentOutput,
+    path_file: Optional[Path] = None,
+    show: bool = False,
 ):
     fig, axes = plt.subplots(3, 1, figsize=(12, 8))
     flight_state = experiment_result.flight_state
@@ -231,18 +216,19 @@ def plot_flight(
     axes[2].legend()
 
     plt.tight_layout()
-    plt.show()
+    if show:
+        plt.show()
+    if path_file is not None:
+        path_file.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(path_file)
+        print(f"Flight plot saved to {path_file}")
 
 
-def plot_polar(aircraft_model: AircraftModel):
-    plt.plot(aircraft_model.list_velocity_m_s, aircraft_model.list_sink_rate_m_s)
-    plt.xlabel("Velocity (m/s)")
-    plt.ylabel("Sink Rate (m/s)")
-    plt.title("Polar")
-    plt.show()
-
-
-def plot_flight_conditions(flight_conditions: FlightConditions):
+def plot_flight_conditions(
+    flight_conditions: FlightConditions,
+    path_file: Optional[Path] = None,
+    show: bool = False,
+):
     """
     Plot thermal strengths along the flight distance from 0 to max distance.
     Uses the series_termal function to get blocky series for plotting.
@@ -288,4 +274,9 @@ def plot_flight_conditions(flight_conditions: FlightConditions):
     ax.legend()
 
     plt.tight_layout()
-    plt.show()
+    if path_file is not None:
+        path_file.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(path_file)
+        print(f"Flight conditions plot saved to {path_file}")
+    if show:
+        plt.show()

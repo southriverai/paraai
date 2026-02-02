@@ -6,19 +6,19 @@ import pandas as pd
 from paraai.experiment import ExperimentOutputBatch
 from paraai.flight_conditions import FlightConditionsDistribution
 from paraai.flight_policy import FlightPolicyAlwaysTermal, FlightPolicyBase, FlightPolicyNeverTermal, FlightPolicyThreeZones
-from paraai.model import AircraftModel
 from paraai.flight_policy_neural import FlightPolicyNeuralNetwork
+from paraai.model import AircraftModel
 from paraai.simulator_crude import SimulatorCrude
 from paraai.tools_plot import get_statistics
 
 
-def creat_table():
+def create_table():
     aircraft_model = AircraftModel(
         velocity_max_m_s=10,
         sink_max_m_s=-1,
     )
-    list_condition_names = ["cond_05", "cond_20", "cond_40"]
-    list_condition_terms = [0.5, 2.0, 4.0]
+    list_condition_names = ["cond_05"]
+    list_condition_terms = [0.5]
     flight_policies: list[FlightPolicyBase] = []
     flight_policies.append(FlightPolicyNeverTermal())
     flight_policies.append(FlightPolicyAlwaysTermal())
@@ -27,11 +27,13 @@ def creat_table():
     flight_policies.append(FlightPolicyThreeZones(0.8, 0.3))
     flight_policies.append(FlightPolicyThreeZones(0.7, 0.1))
     flight_policies.append(FlightPolicyThreeZones(0.6, 0.0))
-    flight_policies.append(FlightPolicyNeuralNetwork(
-        model_path=Path("data", "experiments", "ex_32_16_1", "best", "best_model.pth"),
-        hidden_sizes=[32, 16],
-    ))
-
+    flight_policies.append(
+        FlightPolicyNeuralNetwork(
+            policy_name="NeuralNetwork",
+            model_path=Path("models", "neural_policy.pth"),
+            hidden_sizes=[32, 16],
+        )
+    )
 
     policy_labels = [policy.policy_name for policy in flight_policies]
 
@@ -53,12 +55,12 @@ def creat_table():
             path_file_result = Path("data", "results", condition_name, f"{flight_policy.get_hash()}.json")
             # create directory if not exists
             path_file_result.parent.mkdir(parents=True, exist_ok=True)
-            if Path(path_file_result).exists():
+            if Path(path_file_result).exists() and flight_policy.policy_name != "NeuralNetwork":  # always rerun neural network
                 experiment_output_batch = ExperimentOutputBatch.model_validate_json(Path(path_file_result).read_text())
             else:
                 experiment_output_batch = simulator.simulate_batch(
                     flight_policy,
-                    num_simulations=1000,
+                    num_simulations=5000,
                 )
                 Path(path_file_result).write_text(experiment_output_batch.model_dump_json())
 
@@ -94,4 +96,9 @@ def creat_table():
 
 
 if __name__ == "__main__":
-    creat_table()
+    # create_table()
+    # plot_conditions(show=False)
+    # plot_sim(show=False)
+    from script.plot_hist import plot_hist
+
+    plot_hist(show=False)
