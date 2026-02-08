@@ -7,4 +7,12 @@
       "source.organizeImports.ruff": "explicit"
     }
   },
+  "editor.tabCompletion": "on",
+  "editor.quickSuggestions": {
+    "other": "on",
+    "comments": "off",
+    "strings": "on"
+  },
+  "editor.acceptSuggestionOnCommitCharacter": true,
+  "editor.suggestOnTriggerCharacters": true
 }

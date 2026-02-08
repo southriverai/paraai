@@ -6,6 +6,8 @@ import numpy as np
 
 from paraai.experiment import ExperimentOutput, ExperimentOutputBatch
 from paraai.flight_conditions import FlightConditions
+from paraai.model.tracklog import TracklogBody
+from paraai.tools_tracklog import CleanTracklogResult
 
 
 def get_statistics(experiment_output_batch: ExperimentOutputBatch):
@@ -278,5 +280,79 @@ def plot_flight_conditions(
         path_file.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(path_file)
         print(f"Flight conditions plot saved to {path_file}")
+    if show:
+        plt.show()
+
+
+def plot_tracklog_modifications(
+    original: TracklogBody,
+    modified: TracklogBody,
+    report: CleanTracklogResult,
+    path_file: Optional[Path] = None,
+    show: bool = True,
+):
+    """
+    Plot time vs altitude comparing original and modified tracklog in separate subplots.
+
+    Both plots share the same domain (time and altitude) for direct comparison.
+    """
+    fig, (ax_orig, ax_mod) = plt.subplots(2, 1, figsize=(14, 10), sharex=True, sharey=True)
+
+    arr_orig = original.as_array()
+    arr_mod = modified.as_array()
+
+    time_orig = arr_orig[:, 3]
+    alt_orig = arr_orig[:, 2]
+    time_mod = arr_mod[:, 3]
+    alt_mod = arr_mod[:, 2]
+
+    # Use original domain so both plots match even when modified is cropped
+    x_min, x_max = time_orig.min(), time_orig.max()
+    y_min, y_max = alt_orig.min(), alt_orig.max()
+
+    # Original
+    ax_orig.plot(time_orig, alt_orig, color="steelblue", linestyle="-", alpha=0.9, linewidth=2)
+    ax_orig.set_xlim(x_min, x_max)
+    ax_orig.set_ylim(y_min, y_max)
+    ax_orig.set_ylabel("Altitude (m)")
+    ax_orig.set_title("Original")
+    ax_orig.grid(True, alpha=0.3)
+
+    # Modified (cropped, but same domain)
+    ax_mod.plot(time_mod, alt_mod, color="steelblue", linestyle="-", alpha=0.9, linewidth=2)
+    if len(time_mod) > 0 and time_mod[-1] < x_max:
+        ax_mod.axvspan(time_mod[-1], x_max, alpha=0.15, color="red", label="Removed")
+        ax_mod.legend(loc="lower left")
+    ax_mod.set_xlim(x_min, x_max)
+    ax_mod.set_ylim(y_min, y_max)
+    ax_mod.set_xlabel("Time (seconds from takeoff)")
+    ax_mod.set_ylabel("Altitude (m)")
+    ax_mod.set_title("Modified")
+    ax_mod.grid(True, alpha=0.3)
+
+    # Report summary
+    report_text = (
+        f"Report:\n"
+        f"  Points removed (after landing): {report.end_timepoints_removed}\n"
+        f"  Extreme timepoints removed: {report.extreme_timepoints_removed}\n"
+        f"  Extreme timepoints retained: {report.extreme_timepoints_retained}\n"
+        f"  Time consistency: {report.time_consistency}"
+    )
+    ax_orig.text(
+        0.02,
+        0.98,
+        report_text,
+        transform=ax_orig.transAxes,
+        fontsize=9,
+        verticalalignment="top",
+        bbox={"boxstyle": "round", "facecolor": "wheat", "alpha": 0.8},
+        family="monospace",
+    )
+
+    plt.tight_layout()
+    if path_file is not None:
+        path_file.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(path_file)
+        print(f"Tracklog modifications plot saved to {path_file}")
     if show:
         plt.show()
