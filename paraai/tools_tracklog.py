@@ -13,10 +13,10 @@ def _kalman_filter_extreme_points(
     points: list[tuple[float, float, float, int]],
 ) -> tuple[list[tuple[float, float, float, int]], int]:
     """
-    Remove points where vertical speed from estimated state to observation exceeds 10 m/s.
-    Uses a simple 1D Kalman filter on altitude. When a point would imply |v| > 10 m/s,
-    reject it (don't update state, remove from output).
-    Returns (filtered_points, num_removed).
+    Impute altitude for points where vertical speed from estimated state to observation
+    exceeds 10 m/s. Lat and lng are kept as-is (more reliable); only altitude is imputed
+    using the Kalman filter prediction.
+    Returns (filtered_points, num_imputed).
     """
     if len(points) < 2:
         return points, 0
@@ -29,20 +29,14 @@ def _kalman_filter_extreme_points(
     Q = np.diag([0.1, 0.5])  # process noise
     R = np.array([[50.0]])  # measurement noise (m^2)
 
-    kept: list[tuple[float, float, float, int]] = [points[0]]
-    num_removed = 0
+    result: list[tuple[float, float, float, int]] = [points[0]]
+    num_imputed = 0
 
     for i in range(1, len(points)):
         lat, lng, alt, ts = points[i]
         dt = ts - ts0
         if dt <= 0:
-            num_removed += 1
-            continue
-
-        # Gating: reject if vertical speed from last estimate to observation > 10 m/s
-        v_obs = (alt - x[0]) / dt
-        if abs(v_obs) > MAX_VERTICAL_SPEED_M_S:
-            num_removed += 1
+            # Skip duplicate/out-of-order timestamps
             continue
 
         # Predict
@@ -50,18 +44,27 @@ def _kalman_filter_extreme_points(
         x_pred = F_dt @ x
         P_pred = F_dt @ P @ F_dt.T + Q * dt
 
-        # Update
-        z = np.array([[alt]])
-        y = z - H @ x_pred
-        S = H @ P_pred @ H.T + R
-        K = P_pred @ H.T @ np.linalg.inv(S)
-        x = x_pred + (K @ y).ravel()
-        P = (np.eye(2) - K @ H) @ P_pred
+        # Gating: if vertical speed to observation > 10 m/s, impute altitude (keep lat, lng)
+        v_obs = (alt - x[0]) / dt
+        if abs(v_obs) > MAX_VERTICAL_SPEED_M_S:
+            alt_imputed = float(x_pred[0])
+            result.append((lat, lng, alt_imputed, ts))
+            x = x_pred
+            P = P_pred
+            num_imputed += 1
+        else:
+            # Update with observation
+            z = np.array([[alt]])
+            y = z - H @ x_pred
+            S = H @ P_pred @ H.T + R
+            K = P_pred @ H.T @ np.linalg.inv(S)
+            x = x_pred + (K @ y).ravel()
+            P = (np.eye(2) - K @ H) @ P_pred
+            result.append((lat, lng, alt, ts))
 
-        kept.append((lat, lng, alt, ts))
         ts0 = ts
 
-    return kept, num_removed
+    return result, num_imputed
 
 
 def _remove_data_after_landing(
@@ -108,17 +111,15 @@ def _remove_data_after_landing(
 
 
 class CleanTracklogResult(BaseModel):
-    extreme_timepoints_removed: int
-    extreme_timepoints_retained: int
-    end_timepoints_removed: int
-    time_consistency: int
+    altitudes_imputed: int
+    points_after_kalman: int
+    points_removed_after_landing: int
 
     def __str__(self) -> str:
         return f"""CleanTracklogResult:
-        extreme_timepoints_removed={self.extreme_timepoints_removed}
-        extreme_timepoints_retained={self.extreme_timepoints_retained}
-        end_timepoints_removed={self.end_timepoints_removed}
-        time_consistency={self.time_consistency}"""
+        altitudes_imputed={self.altitudes_imputed}
+        points_after_kalman={self.points_after_kalman}
+        points_removed_after_landing={self.points_removed_after_landing}"""
 
     def __repr__(self) -> str:
         return self.__str__()
@@ -139,21 +140,19 @@ def clean_tracklog(tracklog_body: TracklogBody) -> tuple[TracklogBody, CleanTrac
     # Do this before cropping the end
     (
         clean_tracklog_body.points_lat_lng_alt_ts,
-        extreme_timepoints_removed,
+        altitudes_imputed,
     ) = _kalman_filter_extreme_points(clean_tracklog_body.points_lat_lng_alt_ts)
-    extreme_timepoints_retained = len(clean_tracklog_body.points_lat_lng_alt_ts)
+    points_after_kalman = len(clean_tracklog_body.points_lat_lng_alt_ts)
 
     # Step 2: remove data after landing (vertical speed near 0 for sustained period)
-    points_before_crop = len(clean_tracklog_body.points_lat_lng_alt_ts)
     (
         clean_tracklog_body.points_lat_lng_alt_ts,
-        end_timepoints_removed,
+        points_removed_after_landing,
     ) = _remove_data_after_landing(clean_tracklog_body.points_lat_lng_alt_ts)
 
     clean_tracklog_results = CleanTracklogResult(
-        extreme_timepoints_removed=extreme_timepoints_removed,
-        extreme_timepoints_retained=extreme_timepoints_retained,
-        end_timepoints_removed=end_timepoints_removed,
-        time_consistency=0,
+        altitudes_imputed=altitudes_imputed,
+        points_after_kalman=points_after_kalman,
+        points_removed_after_landing=points_removed_after_landing,
     )
     return clean_tracklog_body, clean_tracklog_results

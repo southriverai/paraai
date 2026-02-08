@@ -333,10 +333,9 @@ def plot_tracklog_modifications(
     # Report summary
     report_text = (
         f"Report:\n"
-        f"  Points removed (after landing): {report.end_timepoints_removed}\n"
-        f"  Extreme timepoints removed: {report.extreme_timepoints_removed}\n"
-        f"  Extreme timepoints retained: {report.extreme_timepoints_retained}\n"
-        f"  Time consistency: {report.time_consistency}"
+        f"  Altitudes imputed: {report.altitudes_imputed}\n"
+        f"  Points after Kalman: {report.points_after_kalman}\n"
+        f"  Points removed (after landing): {report.points_removed_after_landing}"
     )
     ax_orig.text(
         0.02,
