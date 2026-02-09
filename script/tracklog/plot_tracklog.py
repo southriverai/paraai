@@ -7,6 +7,7 @@ from matplotlib.collections import LineCollection
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
 
 from paraai.model.tracklog import TracklogBody
+from paraai.tools_tracklogbody import get_climb_regions
 
 
 async def plot_tracklog(tracklog_body: TracklogBody):
@@ -102,37 +103,9 @@ async def plot_tracklog(tracklog_body: TracklogBody):
     # Add colorbar
     plt.colorbar(line_time, ax=ax2)
 
-    # Mark climbs that last more than 60 seconds
-    MIN_CLIMB_DURATION_SECONDS = 60
     timestamps = array_tracklog_body[:, 3]
     altitudes = array_tracklog_body[:, 2]
-    vertical_speeds = array_tracklog_vertical_speed
-
-    # Identify climbs (vertical speed > 0)
-    is_climbing = vertical_speeds > 0
-
-    # Find continuous climb regions
-    climb_regions = []
-    in_climb = False
-    climb_start_idx = 0
-
-    for i in range(len(is_climbing)):
-        if is_climbing[i] and not in_climb:
-            # Start of a climb
-            climb_start_idx = i
-            in_climb = True
-        elif not is_climbing[i] and in_climb:
-            # End of a climb
-            climb_duration = timestamps[i - 1] - timestamps[climb_start_idx]
-            if climb_duration > MIN_CLIMB_DURATION_SECONDS:
-                climb_regions.append((climb_start_idx, i - 1))
-            in_climb = False
-
-    # Handle case where climb continues to the end
-    if in_climb:
-        climb_duration = timestamps[-1] - timestamps[climb_start_idx]
-        if climb_duration > MIN_CLIMB_DURATION_SECONDS:
-            climb_regions.append((climb_start_idx, len(timestamps) - 1))
+    climb_regions = get_climb_regions(tracklog_body, smoothing_time_seconds=60.0)
 
     # Mark long climbs on the plot
     for start_idx, end_idx in climb_regions:

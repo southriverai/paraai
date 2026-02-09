@@ -1,10 +1,11 @@
+import numpy as np
 from pydantic import BaseModel
 
-import numpy as np
-
+from paraai.model.climb import Climb
 from paraai.model.tracklog import TracklogBody
 
 MAX_VERTICAL_SPEED_M_S = 10.0
+MIN_CLIMB_DURATION_SECONDS = 60
 NEAR_ZERO_VERTICAL_SPEED_M_S = 0.5
 MIN_LANDED_DURATION_SECONDS = 30.0
 
@@ -123,6 +124,80 @@ class CleanTracklogResult(BaseModel):
 
     def __repr__(self) -> str:
         return self.__str__()
+
+
+def get_climb_regions(
+    tracklog_body: TracklogBody,
+    smoothing_time_seconds: float = 60.0,
+) -> list[tuple[int, int]]:
+    """
+    Detect climbs (continuous periods of positive vertical speed > MIN_CLIMB_DURATION_SECONDS).
+    Returns list of (start_idx, end_idx) for each climb region.
+    """
+    arr = tracklog_body.as_array()
+    timestamps_rel = arr[:, 3]
+    vertical_speeds = tracklog_body.get_array_vertical_speed(
+        smoothing_time_seconds=smoothing_time_seconds
+    )
+    is_climbing = vertical_speeds > 0
+
+    climb_regions: list[tuple[int, int]] = []
+    in_climb = False
+    climb_start_idx = 0
+
+    for i in range(len(is_climbing)):
+        if is_climbing[i] and not in_climb:
+            climb_start_idx = i
+            in_climb = True
+        elif not is_climbing[i] and in_climb:
+            climb_duration = int(timestamps_rel[i - 1]) - int(timestamps_rel[climb_start_idx])
+            if climb_duration > MIN_CLIMB_DURATION_SECONDS:
+                climb_regions.append((climb_start_idx, i - 1))
+            in_climb = False
+
+    if in_climb:
+        climb_duration = int(timestamps_rel[-1]) - int(timestamps_rel[climb_start_idx])
+        if climb_duration > MIN_CLIMB_DURATION_SECONDS:
+            climb_regions.append((climb_start_idx, len(timestamps_rel) - 1))
+
+    return climb_regions
+
+
+def extract_climbs(
+    tracklog_body: TracklogBody,
+    takeoff_timestamp_utc: int,
+    smoothing_time_seconds: float = 60.0,
+) -> list[Climb]:
+    """
+    Detect climbs and return as Climb objects with lat/lng centroid and time/altitude series in UTC.
+    """
+    arr = tracklog_body.as_array()
+    timestamps_rel = arr[:, 3]
+    altitudes = arr[:, 2]
+    lats = arr[:, 0]
+    lngs = arr[:, 1]
+
+    climb_regions = get_climb_regions(tracklog_body, smoothing_time_seconds)
+
+    climbs: list[Climb] = []
+    for climb_index, (start_idx, end_idx) in enumerate(climb_regions):
+        lat = float(np.mean(lats[start_idx : end_idx + 1]))
+        lng = float(np.mean(lngs[start_idx : end_idx + 1]))
+        list_timestamp_utc = [
+            takeoff_timestamp_utc + int(ts) for ts in timestamps_rel[start_idx : end_idx + 1]
+        ]
+        list_altitude_m = [float(a) for a in altitudes[start_idx : end_idx + 1]]
+        climbs.append(
+            Climb(
+                tracklog_id=tracklog_body.tracklog_id,
+                climb_index=climb_index,
+                lat=lat,
+                lng=lng,
+                list_timestamp_utc=list_timestamp_utc,
+                list_altitude_m=list_altitude_m,
+            )
+        )
+    return climbs
 
 
 def get_altitude_min(tracklog_body: TracklogBody) -> float:
