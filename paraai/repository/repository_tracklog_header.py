@@ -12,6 +12,7 @@ from paraai.model.tracklog import TracklogHeader
 class TracklogHeaderQueryRequest(BaseModel):
     tracklog_ids: Optional[list[str]] = None
     filenames: Optional[list[str]] = None
+    filename: Optional[str] = None  # single filename for existence check
     skip: int = 0
     limit: int = 100
 
@@ -53,29 +54,43 @@ class RepositoryTracklogHeader:
             raise ValueError("RepositoryTracklogHeader not initialized")
         return RepositoryTracklogHeader.instance
 
+    async def get_all(self) -> list[TracklogHeader]:
+        keys = list(self.store.yield_keys())
+        batch_size = 500  # SQLite limit on SQL variables
+        results: list[TracklogHeader] = []
+        for i in range(0, len(keys), batch_size):
+            batch = keys[i : i + batch_size]
+            results.extend(h for h in self.store.mget(batch) if h is not None)
+        return results
+
     def insert(self, tracklog_header: TracklogHeader):
         self.store.set(tracklog_header.tracklog_id, tracklog_header)
 
-    def _build_query(self, query: TracklogHeaderQueryRequest) -> dict:
-        filter = {}
-        if query.tracklog_ids:
-            filter["tracklog_ids"] = query.tracklog_ids
-        if query.filenames:
-            filter["filenames"] = query.filenames
-        query_dict = {
-            "filter": {
-                "filter": filter,
-            },
-            "skip": query.skip,
-            "limit": query.limit,
-        }
-        return query_dict
+    def _build_store_query(self, request: TracklogHeaderQueryRequest) -> dict:
+        """Build MongoDB-style query dict for the underlying store."""
+        result: dict = {}
+        if request.tracklog_ids:
+            result["tracklog_id"] = {"$in": request.tracklog_ids}
+        if request.filenames:
+            result["file_name"] = {"$in": request.filenames}
+        elif request.filename:
+            result["file_name"] = {"$eq": request.filename}
+        return result
 
-    def query(self, query: TracklogHeaderQueryRequest) -> TracklogHeaderQueryResponse:
-        return self.store.query(self._build_query(query))
+    def query(self, request: TracklogHeaderQueryRequest) -> TracklogHeaderQueryResponse:
+        store_query = self._build_store_query(request)
+        limit = request.limit if request.limit > 0 else 0
+        tracklogs = self.store.query(store_query, None, limit, request.skip)
+        return TracklogHeaderQueryResponse(
+            tracklogs=tracklogs,
+            total=len(tracklogs),
+            skip=request.skip,
+            limit=request.limit,
+        )
 
-    def query_one(self, query: TracklogHeaderQueryRequest) -> Optional[TracklogHeader]:
-        return self.store.get(self._build_query(query))
+    def query_one(self, request: TracklogHeaderQueryRequest) -> Optional[TracklogHeader]:
+        response = self.query(request)
+        return response.tracklogs[0] if response.tracklogs else None
 
     async def asample(self, count: int) -> list[TracklogHeader]:
         return await self.store.asample(count)

@@ -5,7 +5,7 @@ from tqdm import tqdm
 
 from paraai.repository.repository_tracklog_body import RepositoryTracklogBody
 from paraai.tools_plot import plot_tracklog_modifications
-from paraai.tools_tracklog import clean_tracklog
+from paraai.tools_tracklogbody import clean_tracklog
 
 
 async def clean_tracklogbody_by_id(tracklog_id: str) -> None:

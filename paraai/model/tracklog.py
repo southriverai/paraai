@@ -1,12 +1,14 @@
 import base64
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
 from pydantic import BaseModel
 from scipy.ndimage import gaussian_filter1d
+
+from paraai.model.exception import TracklogIngestException
 
 
 class TracklogBody(BaseModel):
@@ -194,6 +196,17 @@ class TracklogHeader(BaseModel):
             f"""Tracklog {self.tracklog_id} for pilot {self.pilot_name} at date {self.date} with duration {self.duration_seconds} seconds"""
         )
 
+    @property
+    def takeoff_datetime(self) -> datetime:
+        # get the datetime of the takeoff asuming the date is UTC
+        # and the frist timestamp in the series is time of day UTC
+        return datetime.strptime(self.date, "%Y-%m-%d") + timedelta(seconds=self.takeoff_at_timestamp)
+
+    @property
+    def takeoff_timestamp_utc(self) -> int:
+        # convert the takeoff datetime to UTC timestamp
+        return int(self.takeoff_datetime.timestamp())
+
 
 def parse_h_dict(lines: list[str]) -> dict:
     h_dict = {}
@@ -209,11 +222,11 @@ def parse_h_dict(lines: list[str]) -> dict:
                     h_dict["HFFXA"] = line[len("HFFXA") :]
                     continue
                 else:
-                    raise Exception(f"Error alternative parsing line: {line}")
+                    raise RuntimeError(f"Error alternative parsing line: {line}")
             line_key = line.split(":")[0]
             h_dict[line_key] = line.split(":")[1]
-        except Exception:
-            raise Exception(f"Error parsing line: {line}")
+        except Exception as err:
+            raise RuntimeError(f"Error parsing line: {line}") from err
     return h_dict
 
 
@@ -278,7 +291,7 @@ def parse_b_records(text: str) -> tuple[list[tuple[float, float, float, int]], f
         seconds = hh * 3600 + mm * 60 + ss
         if first_seconds is None:
             first_seconds = seconds
-        ts_seconds = seconds - first_seconds
+        ts_seconds = seconds
 
         points.append((lat, lng, alt, int(ts_seconds)))
 
@@ -308,12 +321,14 @@ def parse_igc_bytes(file_name: str, data: bytes) -> tuple["TracklogHeader", "Tra
     date = ""
     if date_raw == "unknown-date":
         print(text)
-        raise Exception(f"Error parsing date from IGC file: {date_raw}")
+        raise TracklogIngestException(f"Error parsing date from IGC file: {date_raw}")
     else:
-        dd = date_raw[5:7]
-        mm = date_raw[7:9]
-        yy = date_raw[9:11]
+        # date_raw is "dd-mm-yy" from parse_h_dict (e.g. "15-03-24")
+        dd = date_raw[0:2]
+        mm = date_raw[3:5]
+        yy = date_raw[6:8]
         date = f"20{yy}-{mm}-{dd}"
+
     pilot_name = h_dict.get("HFPLTPILOTINCHARGE", "NKN")
     crew_name = h_dict.get("HFCM2CREW2", "NKN")
     glider_type = h_dict.get("HFGTYGLIDERTYPE", "NKN")

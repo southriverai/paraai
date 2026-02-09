@@ -7,7 +7,7 @@ import numpy as np
 from paraai.experiment import ExperimentOutput, ExperimentOutputBatch
 from paraai.flight_conditions import FlightConditions
 from paraai.model.tracklog import TracklogBody
-from paraai.tools_tracklog import CleanTracklogResult
+from paraai.tools_tracklogbody import CleanTracklogResult
 
 
 def get_statistics(experiment_output_batch: ExperimentOutputBatch):

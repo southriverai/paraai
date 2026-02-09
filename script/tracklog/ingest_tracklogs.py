@@ -20,9 +20,12 @@ if __name__ == "__main__":
     for path_file_igc in tqdm(path_files_igc, desc="Ingesting tracklogs"):
         filename = path_file_igc.name
         # check if tracklog already exists
-        tracklog_header = repository_tracklog_header.query(TracklogHeaderQueryRequest(filename=filename))
-        if tracklog_header:
-            continue
+        response = repository_tracklog_header.query(TracklogHeaderQueryRequest(filename=filename))
+        for existing in response.tracklogs:
+            tracklog_id = existing.tracklog_id
+            repository_tracklog_body.store.delete(tracklog_id)
+            repository_tracklog_body.store_clean.delete(tracklog_id)
+            repository_tracklog_header.store.delete(tracklog_id)
         tracklog_header, tracklog_body = parse_igc_bytes(path_file_igc.name, path_file_igc.read_bytes())
         repository_tracklog_body.insert(tracklog_body)
         repository_tracklog_header.insert(tracklog_header)
