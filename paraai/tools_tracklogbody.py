@@ -134,7 +134,13 @@ def get_climb_regions(
     Detect climbs (continuous periods of positive vertical speed > MIN_CLIMB_DURATION_SECONDS).
     Returns list of (start_idx, end_idx) for each climb region.
     """
+    if len(tracklog_body.points_lat_lng_alt_ts) < 2:
+        return []
+
     arr = tracklog_body.as_array()
+    if arr.ndim != 2:
+        return []
+
     timestamps_rel = arr[:, 3]
     vertical_speeds = tracklog_body.get_array_vertical_speed(
         smoothing_time_seconds=smoothing_time_seconds
@@ -171,7 +177,13 @@ def extract_climbs(
     """
     Detect climbs and return as Climb objects with lat/lng centroid and time/altitude series in UTC.
     """
+    if len(tracklog_body.points_lat_lng_alt_ts) < 2:
+        return []
+
     arr = tracklog_body.as_array()
+    if arr.ndim != 2:
+        return []
+
     timestamps_rel = arr[:, 3]
     altitudes = arr[:, 2]
     lats = arr[:, 0]

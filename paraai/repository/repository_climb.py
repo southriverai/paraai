@@ -48,3 +48,12 @@ class RepositoryClimb:
         keys_to_delete = [k for k in self.store.yield_keys() if k.startswith(prefix)]
         if keys_to_delete:
             self.store.mdelete(keys_to_delete)
+
+    def get_all(self) -> list[Climb]:
+        keys = list(self.store.yield_keys())
+        batch_size = 500
+        results: list[Climb] = []
+        for i in range(0, len(keys), batch_size):
+            batch = keys[i : i + batch_size]
+            results.extend(c for c in self.store.mget(batch) if c is not None)
+        return results
