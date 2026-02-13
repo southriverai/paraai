@@ -51,55 +51,49 @@ class TracklogBody(BaseModel):
         array_tracklog_body = self.as_array(dtype=np.float32)
         return array_tracklog_body[:, 3]
 
-    def get_array_turn(self) -> np.ndarray:
-        # todo redo this to get degrees per second
-        # get a array of values between 0 and 1 of the angle of the tracklog between every two points
-        # indicating the direction of the turn. 0 is straight, 1 is 180 degrees turn either direction.
-        # it should be a 3 point average
-        # first and last point it should be 0
-        array_latitude = self.get_array_latitude()
-        array_longitude = self.get_array_longitude()
+    def get_array_turn(self, smoothing_time_seconds: float = 60.0) -> np.ndarray:
+        """
+        Calculate angular turn rate (bearing change rate) in radians per second with Gaussian smoothing.
+
+        Uses 3 consecutive points (i-1, i, i+1): bearing change between segments divided by time span.
+        Handles non-uniform time intervals. Same smoothing logic as vertical speed.
+
+        Returns:
+            Array of turn rate in rad/s, one value per data point.
+        """
+        array_tracklog_body = self.as_array()
+        array_latitude = array_tracklog_body[:, 0]
+        array_longitude = array_tracklog_body[:, 1]
+        timestamps = array_tracklog_body[:, 3]
 
         num_points = len(array_latitude)
         if num_points < 3:
-            # Not enough points to calculate turns
             return np.zeros(num_points)
 
-        # Calculate turn based on 3 consecutive points (i-1, i, i+1)
-        # For each middle point, calculate the angle between vectors (i-1->i) and (i->i+1)
-        array_turn = np.zeros(num_points)
+        # Raw angular velocity (rad/s) at inner points 1..n-2
+        turn_raw = np.zeros(num_points)
+        time_diff = np.diff(timestamps.astype(float))
 
         for i in range(1, num_points - 1):
-            # Vector from point i-1 to i
             vec1_lat = array_latitude[i] - array_latitude[i - 1]
             vec1_lng = array_longitude[i] - array_longitude[i - 1]
-
-            # Vector from point i to i+1
             vec2_lat = array_latitude[i + 1] - array_latitude[i]
             vec2_lng = array_longitude[i + 1] - array_longitude[i]
 
-            # Calculate bearings of both vectors
             bearing1 = np.arctan2(vec1_lng, vec1_lat)
             bearing2 = np.arctan2(vec2_lng, vec2_lat)
-
-            # Calculate turn angle: difference between bearings
-            # Handle wrap-around: difference between 350° and 10° should be 20°, not 340°
             bearing_diff = bearing2 - bearing1
-            # Normalize to [-π, π] range to handle wrap-around
             bearing_diff = np.arctan2(np.sin(bearing_diff), np.cos(bearing_diff))
-            # Take absolute value to get turn magnitude (0 to π)
-            turn_angle = np.abs(bearing_diff)
+            turn_angle_rad = np.abs(bearing_diff)
 
-            # Normalize to 0-1: 0 = no turn, 1 = 180° (π) turn
-            array_turn[i] = turn_angle / np.pi
+            dt = timestamps[i + 1] - timestamps[i - 1]
+            turn_raw[i] = turn_angle_rad / dt if dt > 0 else 0.0
 
-        # First and last point are 0 (already set)
+        avg_time_step = np.mean(time_diff[time_diff > 0]) if np.any(time_diff > 0) else 1.0
+        sigma_points = smoothing_time_seconds / (3 * avg_time_step) if avg_time_step > 0 else 1.0
+        sigma_points = max(0.5, sigma_points)
 
-        # smooth the array_turn with a smoothing factor of 0.1
-        smoothing_factor = 5
-        smoothed_array_turn = np.convolve(array_turn, np.ones(smoothing_factor) / smoothing_factor, mode="same")
-        return smoothed_array_turn
-        return array_turn
+        return gaussian_filter1d(turn_raw, sigma=sigma_points, mode="nearest")
 
     def get_array_vertical_speed(self, smoothing_time_seconds: float = 5.0) -> np.ndarray:
         """
@@ -230,7 +224,9 @@ def parse_h_dict(lines: list[str]) -> dict:
     return h_dict
 
 
-def parse_b_records(text: str) -> tuple[list[tuple[float, float, float, int]], float, float, float, float, int]:
+def parse_b_records(
+    text: str, h_dict: Optional[dict[str, str]] = None
+) -> tuple[list[tuple[float, float, float, int]], float, float, float, float, int]:
     """Parse B-records to extract GPS fixes and calculate bounding box."""
     points: list[tuple[float, float, float, int]] = []
     min_lat = 999.0
@@ -264,28 +260,21 @@ def parse_b_records(text: str) -> tuple[list[tuple[float, float, float, int]], f
         if lng_hemi == "W":
             lng = -lng
 
-        # Parse altitude from IGC B-record
-        # Format: BHHMMSSDDMMmmmNDDDMMmmmEAALLLLLGGGGGG
-        # Where: AALLLLL = Pressure altitude (A=altitude type, LLLLL=altitude in meters)
-        #        GGGGGG = GPS altitude (in decimeters)
+        # Parse altitude from IGC B-record (fixed positions per FAI spec)
+        # B record: B(1) + HHMMSS(6) + DDMMmmmN(8) + DDDMMmmmE(9) + A(1) + pressure(5) + gps(5) = 35 chars min
+        # Positions 26-30: pressure alt (5 digits, meters in spec). Some devices use decimeters.
+        # Positions 31-35: GPS alt (5 digits, meters in spec). Some devices use decimeters.
         try:
-            # Look for pressure altitude (AALLLLL format)
-            alt_match = re.search(r"A(\d{5})", line)
-            if alt_match:
-                pressure_alt = float(alt_match.group(1))  # Already in meters
+            if len(line) >= 36:
+                pressure_raw = line[26:31]
+                gps_raw = line[31:36]
+                pressure_alt = float(pressure_raw) if pressure_raw.isdigit() else 0.0
+                gps_alt = float(gps_raw) if gps_raw.isdigit() else 0.0
             else:
                 pressure_alt = 0.0
-
-            # Look for GPS altitude (last 6 chars if numeric)
-            gps_match = re.search(r"(\d{6})$", line)
-            if gps_match:
-                gps_alt = float(gps_match.group(1)) / 10.0  # Convert from decimeters to meters
-            else:
                 gps_alt = 0.0
-
-            # Use pressure altitude if available, otherwise GPS altitude
             alt = pressure_alt if pressure_alt > 0 else gps_alt
-        except Exception:
+        except (ValueError, IndexError):
             alt = 0.0
 
         seconds = hh * 3600 + mm * 60 + ss
@@ -300,6 +289,18 @@ def parse_b_records(text: str) -> tuple[list[tuple[float, float, float, int]], f
         min_lng = min(lng, min_lng)
         max_lng = max(lng, max_lng)
         duration_seconds = ts_seconds
+
+    # Heuristic: some devices (e.g. variometers) output altitude in decimeters.
+    # If max altitude > 6000m (unrealistic for typical paragliding), assume decimeters.
+    if points:
+        max_alt = max(p[2] for p in points)
+        alt_in_decimeters = (
+            max_alt > 6000
+            or (h_dict and "decimeter" in h_dict.get("HFALPALTPRESSURE", "").lower())
+            or (h_dict and "decimeter" in h_dict.get("HFALGALTGPS", "").lower())
+        )
+        if alt_in_decimeters:
+            points = [(lat, lng, alt / 10.0, ts) for lat, lng, alt, ts in points]
 
     return points, min_lat, min_lng, max_lat, max_lng, duration_seconds
 
@@ -344,7 +345,9 @@ def parse_igc_bytes(file_name: str, data: bytes) -> tuple["TracklogHeader", "Tra
     competition_id = h_dict.get("HFCIDCOMPETITIONID", "NKN")
     competition_class = h_dict.get("HFCCLCOMPETITIONCLASS", "NKN")
 
-    points_lat_lng_alt_ts, min_lat, min_lng, max_lat, max_lng, duration_seconds = parse_b_records(text)
+    points_lat_lng_alt_ts, min_lat, min_lng, max_lat, max_lng, duration_seconds = parse_b_records(
+        text, h_dict
+    )
 
     takeoff_lat = points_lat_lng_alt_ts[0][0] if points_lat_lng_alt_ts else 0.0
     takeoff_lng = points_lat_lng_alt_ts[0][1] if points_lat_lng_alt_ts else 0.0
