@@ -1,9 +1,27 @@
+import math
+
 from tqdm import tqdm
 
 from paraai.experiment import ExperimentOutput, ExperimentOutputBatch
 from paraai.flight_conditions import FlightConditions, Termal
 from paraai.flight_policy import FlightPolicyBase
 from paraai.model import AircraftModel, FlightState
+
+
+def thermal_strength_m_s(day_of_year: int) -> float:
+    """Return average thermal strength (vertical speed m/s) for day of year 0-364.
+
+    Based on two-sine fit: c + A1*sin(2πx/365 + φ1) + A2*sin(4πx/365 + φ2).
+    """
+
+    # Two-sine fit from show_months.py (mean climb speed m/s vs day of year)
+    _THERMAL_STRENGTH_C = 0.9187
+    _THERMAL_STRENGTH_A1, _THERMAL_STRENGTH_PHI1 = 0.1619, -1.2368
+    _THERMAL_STRENGTH_A2, _THERMAL_STRENGTH_PHI2 = 0.0375, -1.3013
+    x = day_of_year % 365
+    t1 = 2 * math.pi * x / 365 + _THERMAL_STRENGTH_PHI1
+    t2 = 4 * math.pi * x / 365 + _THERMAL_STRENGTH_PHI2
+    return _THERMAL_STRENGTH_C + _THERMAL_STRENGTH_A1 * math.sin(t1) + _THERMAL_STRENGTH_A2 * math.sin(t2)
 
 
 def simulate_termal(
@@ -24,9 +42,7 @@ def simulate_termal(
     is_landed = False
 
     # Check if we've reached thermal ceiling
-    if node_altitude_m >= flight_conditions.termal_ceiling_m:
-        # not further climbing
-        node_altitude_m = flight_conditions.termal_ceiling_m
+    node_altitude_m = min(flight_conditions.termal_ceiling_m, node_altitude_m)
 
     # Check if we've max flight time
     if node_time_s >= flight_conditions.landing_time_s:
