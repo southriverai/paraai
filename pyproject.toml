@@ -27,6 +27,7 @@ torchaudio = { version = "2.5.1+cu121", source = "pytorch-cu121" }
 
 srai-store = "^0.1.5"
 fastapi = "^0.128.0"
+tqdm = "^4.67.3"
 
 
 [tool.poetry.group.dev.dependencies]

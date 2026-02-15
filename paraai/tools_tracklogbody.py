@@ -451,24 +451,22 @@ def get_plot_data(
     track_xlim = (east_center - east_half, east_center + east_half)
     track_ylim = (north_center - north_half, north_center + north_half)
 
-    # Climb rate series (segment-based, one fewer point than track)
-    altitude_diff = np.diff(altitudes)
-    time_diff = np.diff(timestamps)
-    climb_rate = np.where(time_diff != 0, altitude_diff / time_diff, 0)
-    avg_time_step = float(np.mean(time_diff[time_diff > 0])) if np.any(time_diff > 0) else 1.0
-    window_seconds = 5.0
-    sigma_points = window_seconds / (2 * avg_time_step) if avg_time_step > 0 else 1.0
-    climb_rate_smoothed = gaussian_filter1d(climb_rate, sigma=sigma_points)
-    altitude_midpoints = altitudes[:-1]
+    # Heatmap & mean climb: use only climb segments, climb-definition metric (vertical speed), no pre-smoothing
+    # (heatmap does its own 2D binning + smoothing; pre-smoothing would leak non-climb data)
+    altitude_midpoints = (altitudes[:-1] + altitudes[1:]) / 2.0
+    vs_seg = (array_tracklog_vertical_speed[:-1] + array_tracklog_vertical_speed[1:]) / 2.0
+    vs_seg = np.maximum(vs_seg, 0.0)
 
-    # Thermal segment mask
-    thermal_segment_mask = np.zeros(len(altitude_midpoints), dtype=bool)
+    altitude_thermal: list[float] = []
+    climb_rate_thermal: list[float] = []
     for start_idx, end_idx in climb_regions:
         for i in range(start_idx, end_idx):
-            if i < len(thermal_segment_mask):
-                thermal_segment_mask[i] = True
-    altitude_thermal = altitude_midpoints[thermal_segment_mask]
-    climb_rate_thermal = climb_rate_smoothed[thermal_segment_mask]
+            if i < len(altitude_midpoints):
+                altitude_thermal.append(float(altitude_midpoints[i]))
+                climb_rate_thermal.append(float(vs_seg[i]))
+
+    altitude_thermal = np.array(altitude_thermal) if altitude_thermal else np.array([], dtype=float)
+    climb_rate_thermal = np.array(climb_rate_thermal) if climb_rate_thermal else np.array([], dtype=float)
 
     # Heatmap
     altitude_bins = 50
@@ -476,43 +474,46 @@ def get_plot_data(
     if len(altitude_thermal) > 0 and len(climb_rate_thermal) > 0:
         hist, x_edges, y_edges = np.histogram2d(altitude_thermal, climb_rate_thermal, bins=[altitude_bins, climb_rate_bins])
     else:
-        hist, x_edges, y_edges = np.histogram2d(altitude_midpoints, climb_rate_smoothed, bins=[altitude_bins, climb_rate_bins])
+        hist, x_edges, y_edges = np.histogram2d(altitude_midpoints, vs_seg, bins=[altitude_bins, climb_rate_bins])
         hist = np.zeros_like(hist)
-    hist_smoothed = gaussian_filter(hist, sigma=1.5)
+    hist_smoothed = gaussian_filter(hist, sigma=2.5)
     row_maxima = hist_smoothed.max(axis=1, keepdims=True)
     row_maxima = np.where(row_maxima > 0, row_maxima, 1)
     hist_normalized = hist_smoothed / row_maxima
     heatmap_vmax = float(np.percentile(hist_normalized, 75)) if hist_normalized.size > 0 else 1.0
 
-    # Thermal trajectories: use climb rate computed and smoothed only within each climb (no edge bleed from progress/exploration)
+    # Thermal trajectories: use the same vertical speed that defines climbs (guarantees climb_rate >= 0, no sink)
     THERMAL_TRAJECTORY_SMOOTHING_SECONDS = 40.0
     MIN_POINTS_FOR_SMOOTHING = 2
     thermal_trajectories: list[tuple[np.ndarray, np.ndarray]] = []
     all_alt_thermal: list[float] = []
     all_climb_thermal: list[float] = []
     for start_idx, end_idx in climb_regions:
-        # Extract segment data for this climb only (avoids progress/exploration edge effects)
+        # Use climb-definition vertical speed: segment i gets mean of vs[i] and vs[i+1] (both > 0 in climb)
+        vs_climb = array_tracklog_vertical_speed[start_idx : end_idx + 1].astype(np.float64)
         alts_climb = altitudes[start_idx : end_idx + 1].astype(np.float64)
-        ts_climb = timestamps[start_idx : end_idx + 1].astype(float)
-        time_diff_climb = np.diff(ts_climb)
-        alt_diff_climb = np.diff(alts_climb)
-        climb_rate_raw = np.where(time_diff_climb != 0, alt_diff_climb / time_diff_climb, 0.0)
-        alt_mid_climb = alts_climb[:-1]
+        # Segment climb rate = average of vertical speed at segment endpoints (always >= 0 in climb)
+        climb_rate_seg = (vs_climb[:-1] + vs_climb[1:]) / 2.0
+        climb_rate_seg = np.maximum(climb_rate_seg, 0.0)  # floor at 0 (safety)
+        alt_mid_climb = (alts_climb[:-1] + alts_climb[1:]) / 2.0
 
-        if len(alt_mid_climb) < MIN_POINTS_FOR_SMOOTHING or len(climb_rate_raw) < MIN_POINTS_FOR_SMOOTHING:
-            if len(alt_mid_climb) > 0 and len(climb_rate_raw) > 0:
-                thermal_trajectories.append((alt_mid_climb, climb_rate_raw))
+        if len(alt_mid_climb) < MIN_POINTS_FOR_SMOOTHING or len(climb_rate_seg) < MIN_POINTS_FOR_SMOOTHING:
+            if len(alt_mid_climb) > 0 and len(climb_rate_seg) > 0:
+                thermal_trajectories.append((alt_mid_climb, climb_rate_seg))
                 all_alt_thermal.extend(alt_mid_climb.tolist())
-                all_climb_thermal.extend(climb_rate_raw.tolist())
+                all_climb_thermal.extend(climb_rate_seg.tolist())
             continue
 
+        ts_climb = timestamps[start_idx : end_idx + 1].astype(float)
+        time_diff_climb = np.diff(ts_climb)
         avg_dt = float(np.mean(time_diff_climb[time_diff_climb > 0])) if np.any(time_diff_climb > 0) else 1.0
         if avg_dt <= 0:
             avg_dt = 1.0
         sigma_pts = THERMAL_TRAJECTORY_SMOOTHING_SECONDS / (3.0 * avg_dt)
         sigma_pts = max(0.5, min(sigma_pts, (end_idx - start_idx) / 2.0))
         alt_smooth = gaussian_filter1d(alt_mid_climb, sigma=sigma_pts, mode="nearest")
-        climb_smooth = gaussian_filter1d(climb_rate_raw.astype(np.float64), sigma=sigma_pts, mode="nearest")
+        climb_smooth = gaussian_filter1d(climb_rate_seg, sigma=sigma_pts, mode="nearest")
+        climb_smooth = np.maximum(climb_smooth, 0.0)  # ensure no sink after smoothing
         thermal_trajectories.append((alt_smooth, climb_smooth))
         all_alt_thermal.extend(alt_smooth.tolist())
         all_climb_thermal.extend(climb_smooth.tolist())
@@ -558,7 +559,7 @@ def get_plot_data(
         track_xlim=track_xlim,
         track_ylim=track_ylim,
         altitude_midpoints=altitude_midpoints,
-        climb_rate_smoothed=climb_rate_smoothed,
+        climb_rate_smoothed=vs_seg,
         altitude_thermal=altitude_thermal,
         climb_rate_thermal=climb_rate_thermal,
         hist_normalized=hist_normalized,

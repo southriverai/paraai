@@ -17,10 +17,9 @@ def _safe_takeoff_utc(header) -> int | None:
 
 
 async def main():
-    path_dir_database = Path("data", "database_sqlite")
-    repo_header = RepositoryTracklogHeader.initialize_sqlite(path_dir_database)
+    repo_header = RepositoryTracklogHeader.get_instance()
     repo_body = RepositoryTracklogBody.get_instance()
-    repo_climb = RepositoryClimb.initialize_sqlite(path_dir_database)
+    repo_climb = RepositoryClimb.get_instance()
 
     headers = await repo_header.get_all()
     total_climbs = 0
@@ -47,5 +46,7 @@ async def main():
 
 if __name__ == "__main__":
     path_dir_database = Path("data", "database_sqlite")
+    RepositoryClimb.initialize_sqlite(path_dir_database)
     RepositoryTracklogBody.initialize_sqlite(path_dir_database)
+    RepositoryTracklogHeader.initialize_sqlite(path_dir_database)
     asyncio.run(main())
