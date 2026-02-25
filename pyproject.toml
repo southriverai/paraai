@@ -25,9 +25,7 @@ torchvision = { version = "0.20.1+cu121", source = "pytorch-cu121" }
 torchaudio = { version = "2.5.1+cu121", source = "pytorch-cu121" }
 
 
-srai-store = "^0.1.5"
-fastapi = "^0.128.0"
-tqdm = "^4.67.3"
+srai-store = "^0.1.3"
 
 
 [tool.poetry.group.dev.dependencies]
@@ -61,6 +59,7 @@ select = [
 ]
 ignore = [
     "E501",    # Line too long (disable line length warnings)
+    "PLR2004", # constant variable
     "PLR0913", # Too many arguments
     "PLR0912", # Too many branches
     "PLR0915", # Too many statements

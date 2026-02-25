@@ -49,7 +49,7 @@ class RepositoryClimb:
         if keys_to_delete:
             self.store.mdelete(keys_to_delete)
 
-    def get_all(self) -> list[Climb]:
+    async def aget_all(self) -> list[Climb]:
         keys = list(self.store.yield_keys())
         batch_size = 500
         results: list[Climb] = []
@@ -57,3 +57,6 @@ class RepositoryClimb:
             batch = keys[i : i + batch_size]
             results.extend(c for c in self.store.mget(batch) if c is not None)
         return results
+
+    async def asample(self, count: int) -> list[Climb]:
+        return await self.store.asample(count)

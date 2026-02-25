@@ -151,7 +151,7 @@ def main():
     ax_pdf.legend()
     ax_pdf.grid(True, alpha=0.3)
 
-    # Shared axis limits for scatter subplots (5th–95th percentile to exclude outliers)
+    # Shared axis limits for scatter subplots (5th to 95th percentile to exclude outliers)
     all_means = [m for means, _ in season_points.values() for m in means]
     all_stds = [s for _, stds in season_points.values() for s in stds]
     scatter_x_min, scatter_x_max = np.percentile(all_means, [5, 95]) if all_means else (0, 1)

@@ -105,7 +105,7 @@ async def amain():
 
     cmap = plt.colormaps["tab10"]
     fig, ax = plt.subplots(figsize=(10, 8))
-    for rank, cluster_id in enumerate(order, start=1):
+    for _, cluster_id in enumerate(order, start=1):
         mask = np.array(labels) == cluster_id
         ax.scatter(
             np.array(lngs)[mask],
