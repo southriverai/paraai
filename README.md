@@ -20,6 +20,7 @@ poetry run pip install --index-url https://download.pytorch.org/whl/cu121 \
   torch==2.5.1+cu121 \
   torchvision==0.20.1+cu121 \
   torchaudio==2.5.1+cu121
+poetry run pip install torchrl
 ```
 ### Checking if the GPU is happy
 ```bash

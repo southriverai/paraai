@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from paraai.flight_conditions import FlightConditions, Termal
+from paraai.flight_conditions import FlightConditions, Thermal
 from paraai.model import AircraftModel, FlightState
 
 
@@ -10,13 +10,13 @@ class ExperimentInput(BaseModel):
     flight_policies: list[str]
     random_seed: int
     flight_count: int
-    termal_time_step_s: float
+    thermal_time_step_s: float
 
 
 class ExperimentOutput(BaseModel):
     aircraft_model: AircraftModel
     flight_state: FlightState
-    termals: list[Termal]
+    thermals: list[Thermal]
 
 
 class ExperimentOutputBatch(BaseModel):

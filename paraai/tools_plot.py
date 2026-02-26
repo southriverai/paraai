@@ -165,7 +165,7 @@ def plot_flight(
 ):
     fig, axes = plt.subplots(3, 1, figsize=(12, 8))
     flight_state = experiment_result.flight_state
-    termals = experiment_result.termals
+    thermals = experiment_result.thermals
     # Convert distances to kilometers
     distance_km = [d / 1000.0 for d in flight_state.list_distance_m]
     distance_max_km = flight_state.list_distance_m[-1] / 1000.0
@@ -188,7 +188,7 @@ def plot_flight(
     axes[1].grid(True)
 
     # plot flight conditions (thermal strength vs distance)
-    distance_series, thermal_strength_series = FlightConditions.series_termal(termals, flight_state.list_distance_m[-1])
+    distance_series, thermal_strength_series = FlightConditions.series_thermal(thermals, flight_state.list_distance_m[-1])
     # Convert distance from meters to kilometers for better readability
     distance_series_km = [d / 1000.0 for d in distance_series]
 
@@ -233,10 +233,10 @@ def plot_flight_conditions(
 ):
     """
     Plot thermal strengths along the flight distance from 0 to max distance.
-    Uses the series_termal function to get blocky series for plotting.
+    Uses the series_thermal function to get blocky series for plotting.
     """
-    # Get blocky series from series_termal function
-    distance_series, thermal_strength_series = flight_conditions.series_termal_sampled()
+    # Get blocky series from series_thermal function
+    distance_series, thermal_strength_series = flight_conditions.series_thermal_sampled()
 
     # Convert distance from meters to kilometers
     distance_series_km = [d / 1000.0 for d in distance_series]

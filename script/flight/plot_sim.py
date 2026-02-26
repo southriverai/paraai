@@ -9,8 +9,8 @@ from paraai.tools_plot import plot_flight
 
 def plot_sim(show: bool = True):
     flight_conditions_distribution = FlightConditionsDistribution(
-        termal_net_climb_mean_min_m_s=0.5,
-        termal_net_climb_mean_max_m_s=0.5,
+        thermal_net_climb_mean_min_m_s=0.5,
+        thermal_net_climb_mean_max_m_s=0.5,
     )
 
     aircraft_model = AircraftModel(

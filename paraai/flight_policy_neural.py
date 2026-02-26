@@ -109,19 +109,13 @@ class FlightPolicyNeuralNetwork(FlightPolicyBase):
 
     def _init_weights(self) -> None:
         for module in self.network.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.Conv2d):
-                nn.init.xavier_uniform_(module.weight)
-                nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.ConvTranspose2d):
-                nn.init.xavier_uniform_(module.weight)
-                nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.Conv3d):
-                nn.init.xavier_uniform_(module.weight)
-                nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.ConvTranspose3d):
+            if (
+                isinstance(module, nn.Linear)
+                or isinstance(module, nn.Conv2d)
+                or isinstance(module, nn.ConvTranspose2d)
+                or isinstance(module, nn.Conv3d)
+                or isinstance(module, nn.ConvTranspose3d)
+            ):
                 nn.init.xavier_uniform_(module.weight)
                 nn.init.zeros_(module.bias)
             elif isinstance(module, nn.BatchNorm2d):
@@ -227,7 +221,7 @@ class FlightPolicyNeuralNetwork(FlightPolicyBase):
         # make it 1 by n array
         return features
 
-    def use_termal(self, flight_state: FlightState, aircraft_model: AircraftModel) -> bool:
+    def use_thermal(self, flight_state: FlightState, aircraft_model: AircraftModel) -> bool:
         """
         Use neural network to decide whether to use thermal.
 

@@ -2,7 +2,7 @@ from pathlib import Path
 
 from paraai.experiment import ExperimentOutputBatch
 from paraai.flight_conditions import FlightConditionsDistribution
-from paraai.flight_policy import FlightPolicyAlwaysTermal, FlightPolicyThreeZones
+from paraai.flight_policy import FlightPolicyAlwaysThermal, FlightPolicyThreeZones
 from paraai.flight_policy_neural import FlightPolicyNeuralNetwork
 from paraai.model import AircraftModel
 from paraai.simulator_crude import SimulatorCrude
@@ -15,7 +15,7 @@ def plot_hist(show: bool = False):
         sink_max_m_s=-1,
     )
 
-    flight_policy_at = FlightPolicyAlwaysTermal()
+    flight_policy_at = FlightPolicyAlwaysThermal()
     flight_policy_tz = FlightPolicyThreeZones(0.9, 0.5)
     flight_policy_nn = FlightPolicyNeuralNetwork(
         policy_name="NeuralNetwork",
@@ -28,8 +28,8 @@ def plot_hist(show: bool = False):
     list_condition_terms = [0.5]
     for condition_name, condition_term in zip(list_condition_names, list_condition_terms):
         flight_conditions_distribution = FlightConditionsDistribution(
-            termal_net_climb_mean_min_m_s=condition_term,
-            termal_net_climb_mean_max_m_s=condition_term,
+            thermal_net_climb_mean_min_m_s=condition_term,
+            thermal_net_climb_mean_max_m_s=condition_term,
         )
         simulator = SimulatorCrude(
             flight_condition_distribution=flight_conditions_distribution,

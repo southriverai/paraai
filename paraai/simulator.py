@@ -12,11 +12,11 @@ class Simulator:
         self,
         flight_condition_distribution: FlightConditionsDistribution,
         aircraft_model: AircraftModel,
-        termal_time_step_s: float = 60.0,
+        thermal_time_step_s: float = 60.0,
     ):
         self.flight_condition_distribution = flight_condition_distribution
         self.aircraft_model = aircraft_model
-        self.termal_time_step_s = termal_time_step_s
+        self.thermal_time_step_s = thermal_time_step_s
 
     def simulate_batch(
         self,
@@ -39,5 +39,5 @@ class Simulator:
             flight_conditions,
             self.aircraft_model,
             policy,
-            self.termal_time_step_s,
+            self.thermal_time_step_s,
         )

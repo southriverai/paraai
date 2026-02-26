@@ -5,7 +5,7 @@ import pandas as pd
 
 from paraai.experiment import ExperimentOutputBatch
 from paraai.flight_conditions import FlightConditionsDistribution
-from paraai.flight_policy import FlightPolicyAlwaysTermal, FlightPolicyBase, FlightPolicyNeverTermal, FlightPolicyThreeZones
+from paraai.flight_policy import FlightPolicyAlwaysThermal, FlightPolicyBase, FlightPolicyNeverThermal, FlightPolicyThreeZones
 from paraai.flight_policy_neural import FlightPolicyNeuralNetwork
 from paraai.model import AircraftModel
 from paraai.simulator_crude import SimulatorCrude
@@ -20,8 +20,8 @@ def create_table():
     list_condition_names = ["cond_05"]
     list_condition_terms = [0.5]
     flight_policies: list[FlightPolicyBase] = []
-    flight_policies.append(FlightPolicyNeverTermal())
-    flight_policies.append(FlightPolicyAlwaysTermal())
+    flight_policies.append(FlightPolicyNeverThermal())
+    flight_policies.append(FlightPolicyAlwaysThermal())
     flight_policies.append(FlightPolicyThreeZones(1.0, 0.7))
     flight_policies.append(FlightPolicyThreeZones(0.9, 0.5))
     flight_policies.append(FlightPolicyThreeZones(0.8, 0.3))
@@ -44,8 +44,8 @@ def create_table():
     for condition_name, condition_term in zip(list_condition_names, list_condition_terms):
         for flight_policy in flight_policies:
             flight_conditions_distribution = FlightConditionsDistribution(
-                termal_net_climb_mean_min_m_s=condition_term,
-                termal_net_climb_mean_max_m_s=condition_term,
+                thermal_net_climb_mean_min_m_s=condition_term,
+                thermal_net_climb_mean_max_m_s=condition_term,
             )
             simulator = SimulatorCrude(
                 flight_condition_distribution=flight_conditions_distribution,

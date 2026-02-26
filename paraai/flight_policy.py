@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from paraai.model import AircraftModel, FlightState
+from paraai.model.model import ActionNode, AircraftModel, FlightState
 
 
 class FlightPolicyBase(ABC):
@@ -13,42 +13,39 @@ class FlightPolicyBase(ABC):
         self.policy_name = policy_name
 
     @abstractmethod
-    def use_termal(self, flight_state: FlightState, aircraft_model: AircraftModel) -> bool:
+    def get_action(self, flight_state: FlightState, aircraft_model: AircraftModel) -> ActionNode:
         pass
 
     def get_hash(self) -> str:
         return hashlib.sha256(self.policy_name.encode()).hexdigest()
 
 
-class FlightPolicyNeverTermal(FlightPolicyBase):
+class FlightPolicyNeverThermal(FlightPolicyBase):
     def __init__(self):
-        super().__init__(policy_name="NeverTermal")
+        super().__init__(policy_name="NeverThermal")
 
-    def use_termal(
+    def get_action(
         self,
         flight_state: FlightState,
         aircraft_model: AircraftModel,
-    ) -> bool:
-        return False
+    ) -> ActionNode:
+        return ActionNode(use_thermal=False)
 
 
-class FlightPolicyAlwaysTermal(FlightPolicyBase):
+class FlightPolicyAlwaysThermal(FlightPolicyBase):
     def __init__(self):
-        super().__init__(policy_name="AlwaysTermal")
+        super().__init__(policy_name="AlwaysThermal")
 
-    def use_termal(
+    def get_action(
         self,
         flight_state: FlightState,
         aircraft_model: AircraftModel,
-    ) -> bool:
-        # if we experience climb since the last node we keep termaling
-        if len(flight_state.list_altitude_m) < 2:
-            return False
-        last_climb = flight_state.list_altitude_m[-1] - flight_state.list_altitude_m[-2]
-        if last_climb > 0:
-            return True
+    ) -> ActionNode:
+        # if have climb we try to keep thermaling
+        if flight_state.has_climb():
+            return ActionNode(use_thermal=True)
         else:
-            return False
+            return ActionNode(use_thermal=False)
 
 
 class FlightPolicyThreeZones(FlightPolicyBase):
@@ -56,37 +53,35 @@ class FlightPolicyThreeZones(FlightPolicyBase):
         super().__init__(policy_name=f"ThreeZones {progress_quantile} {lift_zone_quantile}")
         self.progress_quantile = progress_quantile
         self.lift_zone_quantile = lift_zone_quantile
-        self.explore_termal_count = 2
+        self.explore_thermal_count = 2
 
-    def use_termal(
+    def get_action(
         self,
         flight_state: FlightState,
         aircraft_model: AircraftModel,
-    ) -> bool:
-        # Simple three-zone policy: use termal if below starting altitude (survival zone)
-        if len(flight_state.list_altitude_m) < 1:
-            return False
-        altitude = flight_state.list_altitude_m[-1]
-        starting_altitude = flight_state.list_altitude_m[0]  # asume we start at ceiling
+    ) -> ActionNode:
+        # Simple three-zone policy: use thermal if below starting altitude (survival zone)
+        altitude = flight_state.current_altitude_m
+        starting_altitude = flight_state.max_altitude_m  # asume we start at ceiling
         progress_altitude = starting_altitude * 0.66
         lift_altitude = starting_altitude * 0.33
-        current_climb_m_s = flight_state.current_climb_m_s()
-        if current_climb_m_s <= 0:
-            # if we are not climbing, we do not use termal
-            return False
-        termal_climbs = flight_state.termal_climbs()
-        if len(termal_climbs) < self.explore_termal_count:
-            # if we have not experienced many termals, we do use termal just to try
-            return True
+        if flight_state.has_climb():
+            # if we are not climbing, we do not use thermal
+            return ActionNode(use_thermal=False)
+        thermal_climbs = flight_state.thermal_climbs()
+        if len(thermal_climbs) < self.explore_thermal_count:
+            # if we have not experienced many thermals, we do use thermal just to try
+            return ActionNode(use_thermal=True)
 
-        progress_threshold = np.quantile(termal_climbs, self.progress_quantile)
-        lift_threshold = np.quantile(termal_climbs, self.lift_zone_quantile)
+        progress_threshold = np.quantile(thermal_climbs, self.progress_quantile)
+        lift_threshold = np.quantile(thermal_climbs, self.lift_zone_quantile)
 
-        # If below starting altitude, use termal for survival
+        # If below starting altitude, use thermal for survival
         if altitude > progress_altitude:
-            return current_climb_m_s > progress_threshold
+            use_thermal = flight_state.current_climb_m_s > progress_threshold
         elif altitude > lift_altitude:
-            return current_climb_m_s > lift_threshold
+            use_thermal = flight_state.current_climb_m_s > lift_threshold
         else:
-            # we are in the survival zone so we use termal to survive
-            return True
+            use_thermal = True  # we are in the survival zone so we use thermal to survive
+
+        return ActionNode(use_thermal=use_thermal)

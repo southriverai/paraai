@@ -1,7 +1,7 @@
 from tqdm import tqdm
 
 from paraai.experiment import ExperimentOutput, ExperimentOutputBatch
-from paraai.flight_conditions import FlightConditions, FlightConditionsDistribution, Termal
+from paraai.flight_conditions import FlightConditions, FlightConditionsDistribution, Thermal
 from paraai.flight_policy import FlightPolicyBase
 from paraai.model import AircraftModel, FlightState
 
@@ -34,8 +34,8 @@ class SimulatorCrude:
         policy: FlightPolicyBase,
     ) -> ExperimentOutput:
         flight_conditions = self.flight_condition_distribution.sample()
-        termals = flight_conditions.sample_termals()
-        termal_index = 0
+        thermals = flight_conditions.sample_thermals()
+        thermal_index = 0
 
         time_s = flight_conditions.take_off_time_s
         # add initial state
@@ -48,36 +48,36 @@ class SimulatorCrude:
         )
 
         while flight_state.status == "flying":
-            # get the next termal
-            next_termal = termals[termal_index]
-            self.simulate_progress_to_termal(flight_conditions, self.aircraft_model, flight_state, next_termal)
-            if policy.use_termal(flight_state, self.aircraft_model):
-                self.simulate_termal(flight_conditions, self.aircraft_model, flight_state, next_termal)
-            termal_index += 1
-            # if there are no more termals we land
-            if termal_index >= len(termals):
+            # get the next thermal
+            next_thermal = thermals[thermal_index]
+            self.simulate_progress_to_thermal(flight_conditions, self.aircraft_model, flight_state, next_thermal)
+            if policy.use_thermal(flight_state, self.aircraft_model):
+                self.simulate_thermal(flight_conditions, self.aircraft_model, flight_state, next_thermal)
+            thermal_index += 1
+            # if there are no more thermals we land
+            if thermal_index >= len(thermals):
                 self.simulate_glide_to_landing(flight_conditions, self.aircraft_model, flight_state)
 
         return ExperimentOutput(
             flight_state=flight_state,
-            termals=termals,
+            thermals=thermals,
             aircraft_model=self.aircraft_model,
         )
 
-    def simulate_termal(
+    def simulate_thermal(
         self,
         flight_conditions: FlightConditions,
         aircraft_model: AircraftModel,
         flight_state: FlightState,
-        termal: Termal,
+        thermal: Thermal,
     ):
-        # we are using the termal so in the last state we chose to use one
+        # we are using the thermal so in the last state we chose to use one
         flight_state.list_use_thermal[-1] = True
         last_node_time_s = flight_state.list_time_s[-1]
         last_node_altitude_m = flight_state.list_altitude_m[-1]
         last_node_distance_m = flight_state.list_distance_m[-1]
-        altitude_to_ceiling_m = flight_conditions.termal_ceiling_m - last_node_altitude_m
-        time_to_next_node_s = altitude_to_ceiling_m / termal.net_climb_m_s
+        altitude_to_ceiling_m = flight_conditions.thermal_ceiling_m - last_node_altitude_m
+        time_to_next_node_s = altitude_to_ceiling_m / thermal.net_climb_m_s
 
         # Check if we've maxed flight time
         if last_node_time_s + time_to_next_node_s >= flight_conditions.landing_time_s:
@@ -86,27 +86,27 @@ class SimulatorCrude:
 
         node_time_s = last_node_time_s + time_to_next_node_s
         node_distance_m = last_node_distance_m
-        node_altitude_m = last_node_altitude_m + termal.net_climb_m_s * time_to_next_node_s
+        node_altitude_m = last_node_altitude_m + thermal.net_climb_m_s * time_to_next_node_s
 
         flight_state.list_time_s.append(node_time_s)
         flight_state.list_distance_m.append(node_distance_m)
         flight_state.list_altitude_m.append(node_altitude_m)
         flight_state.list_use_thermal.append(False)
 
-    def simulate_progress_to_termal(
+    def simulate_progress_to_thermal(
         self,
         flight_conditions: FlightConditions,
         aircraft_model: AircraftModel,
         flight_state: FlightState,
-        termal: Termal,
+        thermal: Thermal,
     ):
         last_node_time_s = flight_state.list_time_s[-1]
         last_node_altitude_m = flight_state.list_altitude_m[-1]
         last_node_distance_m = flight_state.list_distance_m[-1]
 
-        thermal_distance_m = termal.distance_center_m
-        distance_to_termal_m = thermal_distance_m - last_node_distance_m
-        time_to_next_node_s = distance_to_termal_m / aircraft_model.velocity_max_m_s
+        thermal_distance_m = thermal.distance_center_m
+        distance_to_thermal_m = thermal_distance_m - last_node_distance_m
+        time_to_next_node_s = distance_to_thermal_m / aircraft_model.velocity_max_m_s
 
         # Check if we've max flight time
         if last_node_time_s + time_to_next_node_s >= flight_conditions.landing_time_s:
@@ -129,11 +129,11 @@ class SimulatorCrude:
         flight_state.list_altitude_m.append(node_altitude_m)
         flight_state.list_use_thermal.append(False)
 
-        # if we have not landed yetthen add one second of lift to the state so the policy can decide to use termal
+        # if we have not landed yetthen add one second of lift to the state so the policy can decide to use thermal
         if flight_state.status == "flying":
             flight_state.list_time_s.append(node_time_s + 1)
             flight_state.list_distance_m.append(node_distance_m)
-            flight_state.list_altitude_m.append(node_altitude_m + termal.net_climb_m_s * 1)
+            flight_state.list_altitude_m.append(node_altitude_m + thermal.net_climb_m_s * 1)
             flight_state.list_use_thermal.append(False)
 
     def simulate_glide_to_landing(
