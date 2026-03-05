@@ -11,6 +11,7 @@ from scipy.optimize import curve_fit
 from tqdm import tqdm
 
 from paraai.repository.repository_simple_climb import RepositorySimpleClimb
+from paraai.tool_spacetime import utc_to_solar_hour
 
 MONTH_NAMES = (
     "January",
@@ -30,13 +31,6 @@ HOUR_START = 6
 HOUR_END = 22
 MIN_DATAPOINTS = 2000
 CACHE_PATH = Path("data", "climb_strength_by_hour_cache.json")
-
-
-def utc_to_solar_hour(dt: datetime, longitude_deg: float) -> float:
-    """Convert UTC to local solar hour (0-24) using longitude. 15° = 1 hour."""
-    utc_hour_frac = dt.hour + dt.minute / 60 + dt.second / 3600
-    solar_hour = utc_hour_frac + longitude_deg / 15
-    return solar_hour % 24
 
 
 def _sine2d_model(x: np.ndarray, base: float, A_day: float, phi_day: float, A_hour: float, phi_hour: float) -> np.ndarray:

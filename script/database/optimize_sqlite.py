@@ -2,6 +2,7 @@
 
 Run once after ingestion. Indexes and WAL mode persist. Speeds up:
 - ORDER BY on timestamp fields (earliest/latest queries)
+- Bounding box queries on start_lat/start_lon (simple_climb)
 - Key prefix scans (e.g. tracklog_id_*)
 - General read throughput
 
@@ -15,6 +16,8 @@ from pathlib import Path
 # Collections that have timestamp fields worth indexing (others get PRAGMAs only)
 INDEX_START_TS = {"simple_climb"}  # has start_timestamp_utc
 INDEX_LIST_TS_0 = {"climb"}  # has list_timestamp_utc[0]
+# Collections with lat/lon for bounding box queries
+INDEX_START_LAT_LON = {"simple_climb"}  # has start_lat, start_lon
 
 
 def optimize_db(path_db: Path) -> None:
@@ -66,6 +69,21 @@ def optimize_db(path_db: Path) -> None:
             except sqlite3.OperationalError as e:
                 if "duplicate" in str(e).lower() or "already exists" in str(e).lower():
                     print("  Index idx_list_timestamp_utc_0 already exists")
+                else:
+                    raise
+
+        if collection in INDEX_START_LAT_LON:
+            try:
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_start_lat_lon
+                    ON store (json_extract(document, '$.start_lat'), json_extract(document, '$.start_lon'))
+                    """
+                )
+                print("  Created index idx_start_lat_lon")
+            except sqlite3.OperationalError as e:
+                if "duplicate" in str(e).lower() or "already exists" in str(e).lower():
+                    print("  Index idx_start_lat_lon already exists")
                 else:
                     raise
 

@@ -5,6 +5,7 @@ from srai_store.store_provider_base import StoreProviderBase
 from srai_store.store_provider_sqlite import StoreProviderSqlite
 
 from paraai.model.simple_climb import SimpleClimb
+from paraai.tool_spacetime import haversine_m
 
 
 class RepositorySimpleClimb:
@@ -72,6 +73,32 @@ class RepositorySimpleClimb:
         for i in range(0, len(keys), self.BATCH_SIZE):
             batch = keys[i : i + self.BATCH_SIZE]
             results.extend(c for c in self.store.mget(batch) if c is not None)
+        return results
+
+    async def get_all_in_bounding_box(
+        self, lat_deg_min: float, lat_deg_max: float, lng_deg_min: float, lng_deg_max: float
+    ) -> list[SimpleClimb]:
+        query = {
+            "start_lat": {"$gte": lat_deg_min, "$lte": lat_deg_max},
+            "start_lon": {"$gte": lng_deg_min, "$lte": lng_deg_max},
+        }
+        results: list[SimpleClimb] = []
+        skip = 0
+        while True:
+            batch = self.store.query(query, None, self.BATCH_SIZE, skip)
+            results.extend(batch)
+            if len(batch) < self.BATCH_SIZE:
+                break
+            skip += self.BATCH_SIZE
+        return results
+
+    async def get_all_in_radius(self, lat_deg: float, lng_deg: float, radius_m: float) -> list[SimpleClimb]:
+        bounding_box = self.get_all_in_bounding_box(lat_deg - radius_m, lat_deg + radius_m, lng_deg - radius_m, lng_deg + radius_m)
+        results: list[SimpleClimb] = []
+        for c in bounding_box:
+            d = haversine_m(c.start_lat, c.start_lon, lat_deg, lng_deg)
+            if d <= radius_m:
+                results.append(c)
         return results
 
     async def asample(self, count: int) -> list[SimpleClimb]:

@@ -1,29 +1,19 @@
 """Show takeoff lat/lon for a given date. Example: May 18, 2025."""
 
 import asyncio
-import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 from paraai.repository.repository_tracklog_header import RepositoryTracklogHeader
+from paraai.tool_spacetime import haversine_km
 
 TARGET_DATE = "2025-05-18"
 TARGET_SITE_LAT = 45.30933
 TARGET_SITE_LNG = 5.89027
 TARGET_SITE_RADIUS_KM = 50
 CLUSTER_THRESHOLD_KM = 0.5  # Takeoffs within 500 m are same site
-
-
-def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """Distance in km between two lat/lng points."""
-    R = 6371  # Earth radius km
-    dlat = math.radians(lat2 - lat1)
-    dlng = math.radians(lng2 - lng1)
-    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2
-    c = 2 * math.asin(math.sqrt(a))
-    return R * c
 
 
 def leader_follower_cluster(lats: list[float], lngs: list[float], threshold_km: float) -> list[int]:
@@ -38,7 +28,7 @@ def leader_follower_cluster(lats: list[float], lngs: list[float], threshold_km: 
         min_d = float("inf")
         best_j = -1
         for j in range(len(centers_lat)):
-            d = _haversine_km(lat, lng, centers_lat[j], centers_lng[j])
+            d = haversine_km(lat, lng, centers_lat[j], centers_lng[j])
             if d < min_d:
                 min_d = d
                 best_j = j
@@ -61,7 +51,7 @@ async def amain():
     headers = await repo.get_all()
 
     on_date = [h for h in headers if h.date == TARGET_DATE]
-    on_date = [h for h in on_date if _haversine_km(h.takeoff_lat, h.takeoff_lng, TARGET_SITE_LAT, TARGET_SITE_LNG) <= TARGET_SITE_RADIUS_KM]
+    on_date = [h for h in on_date if haversine_km(h.takeoff_lat, h.takeoff_lng, TARGET_SITE_LAT, TARGET_SITE_LNG) <= TARGET_SITE_RADIUS_KM]
     on_date.sort(key=lambda h: (h.takeoff_lat, h.takeoff_lng))
 
     if not on_date:
