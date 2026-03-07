@@ -3,7 +3,6 @@ from typing import Optional
 
 from pydantic import BaseModel
 from srai_store.store_provider_base import StoreProviderBase
-from srai_store.store_provider_disk import StoreProviderDisk
 from srai_store.store_provider_sqlite import StoreProviderSqlite
 
 from paraai.model.tracklog import TracklogHeader
@@ -43,10 +42,10 @@ class RepositoryTracklogHeader:
         store_provider = StoreProviderSqlite("tracklogs", path_dir_database)
         return RepositoryTracklogHeader.initialize(store_provider)
 
-    @staticmethod
-    def initialize_disk(path_dir_database: Path) -> "RepositoryTracklogHeader":
-        store_provider = StoreProviderDisk("tracklogs", path_dir_database)
-        return RepositoryTracklogHeader.initialize(store_provider)
+    # @staticmethod
+    # def initialize_disk(path_dir_database: Path) -> "RepositoryTracklogHeader":
+    #     store_provider = StoreProviderDisk("tracklogs", path_dir_database)
+    #     return RepositoryTracklogHeader.initialize(store_provider)
 
     @staticmethod
     def get_instance() -> "RepositoryTracklogHeader":

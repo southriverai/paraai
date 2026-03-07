@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -6,6 +7,8 @@ from srai_store.store_provider_sqlite import StoreProviderSqlite
 
 from paraai.model.simple_climb import SimpleClimb
 from paraai.tool_spacetime import haversine_m
+
+METERS_PER_DEG_LAT = 111_000
 
 
 class RepositorySimpleClimb:
@@ -67,7 +70,7 @@ class RepositorySimpleClimb:
             batch = keys_to_delete[i : i + self.BATCH_SIZE]
             self.store.mdelete(batch)
 
-    def get_all(self) -> list[SimpleClimb]:
+    async def get_all(self) -> list[SimpleClimb]:
         keys = list(self.store.yield_keys())
         results: list[SimpleClimb] = []
         for i in range(0, len(keys), self.BATCH_SIZE):
@@ -93,7 +96,9 @@ class RepositorySimpleClimb:
         return results
 
     async def get_all_in_radius(self, lat_deg: float, lng_deg: float, radius_m: float) -> list[SimpleClimb]:
-        bounding_box = self.get_all_in_bounding_box(lat_deg - radius_m, lat_deg + radius_m, lng_deg - radius_m, lng_deg + radius_m)
+        deg_lat = radius_m / METERS_PER_DEG_LAT
+        deg_lon = radius_m / (METERS_PER_DEG_LAT * math.cos(math.radians(lat_deg)))
+        bounding_box = await self.get_all_in_bounding_box(lat_deg - deg_lat, lat_deg + deg_lat, lng_deg - deg_lon, lng_deg + deg_lon)
         results: list[SimpleClimb] = []
         for c in bounding_box:
             d = haversine_m(c.start_lat, c.start_lon, lat_deg, lng_deg)

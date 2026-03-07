@@ -44,3 +44,10 @@ This creates all the images and tables used in my speed to fly article
 ```bash
 python scripts/create_all_stf.py
 ```
+
+### Install GDAL (Windows, Python 3.11)
+Gdal is a shitshow, it does not play well with windows for stupid reasons.
+
+Download the wheel: https://github.com/cgohlke/geospatial-wheels/releases/download/v2025.7.4/GDAL-3.11.1-cp311-cp311-win_amd64.whl  
+Then install with pip:  
+pip install GDAL-3.11.1-cp311-cp311-win_amd64.whl
