@@ -42,6 +42,7 @@ def load_terrain(
         cache_path = cache / f"terrain_{h}.npz"
         cached = _load_terrain_cache(cache_path)
         if cached is not None:
+            print(f"Terrain: Using cached {cache_path.name} for bbox lon={lon_min:.4f}-{lon_max:.4f}, lat={lat_min:.4f}-{lat_max:.4f}")
             return cached
 
     dem_path = _download_dem(bbox, dem_resolution, cache)
@@ -158,19 +159,24 @@ def _download_dem(
 
     left, bottom, right, top = bbox
     aoi = [left, bottom, right, top]
+    bbox_str = f"lon={left:.4f}-{right:.4f}, lat={bottom:.4f}-{top:.4f}"
 
     if cache_dir:
         cache_dir.mkdir(parents=True, exist_ok=True)
         h = _bbox_hash(bbox, resolution)
         out_path = cache_dir / f"dem_{h}.tif"
         if out_path.exists():
+            print(f"DEM: Using cached {out_path.name} for bbox ({bbox_str}), {resolution}m resolution")
             return out_path
     else:
         h = _bbox_hash(bbox, resolution)
         out_path = Path(f"dem_{h}.tif")
 
+    print(f"DEM: Downloading Copernicus DEM for bbox ({bbox_str}), {resolution}m resolution -> {out_path}")
     prefixes = get_from_aoi(aoi, resolution=resolution)
+    print(f"DEM: Fetching from AWS ({len(prefixes)} tile(s))...")
     from_aws(prefixes, resolution=resolution, out_path=str(out_path))
+    print(f"DEM: Saved to {out_path}")
 
     return out_path
 
@@ -186,6 +192,10 @@ def _download_sentinel2(
     from odc.stac import load
     from pystac_client import Client
 
+    left, bottom, right, top = bbox
+    bbox_str = f"lon={left:.4f}-{right:.4f}, lat={bottom:.4f}-{top:.4f}"
+    print(f"Sentinel-2: Searching {SENTINEL2_COLLECTION} for bbox ({bbox_str}), datetime={datetime_range}, cloud<{cloud_cover_max}%")
+
     catalog = Client.open(EARTH_SEARCH_URL)
     search = catalog.search(
         collections=[SENTINEL2_COLLECTION],
@@ -196,6 +206,7 @@ def _download_sentinel2(
     items = list(search.items())
 
     if not items:
+        print(f"Sentinel-2: No scenes with cloud<{cloud_cover_max}%, retrying without cloud filter...")
         search_any = catalog.search(
             collections=[SENTINEL2_COLLECTION],
             bbox=bbox,
@@ -219,11 +230,16 @@ def _download_sentinel2(
         key=lambda i: i.properties.get("eo:cloud_cover", 100),
     )
     best = items_sorted[0]
+    scene_id = best.id
+    cloud = best.properties.get("eo:cloud_cover", "?")
+    date = best.properties.get("datetime", best.properties.get("start_datetime", "?"))
+    print(f"Sentinel-2: Using scene {scene_id} (cloud={cloud}%, date={date})")
 
     with rasterio.open(dem_path) as dem_src:
         dem_geobox = GeoBox.from_rio(dem_src)
 
     bands_needed = ["blue", "green", "red", "nir"]
+    print(f"Sentinel-2: Downloading bands {bands_needed} for bbox ({bbox_str}), aligned to DEM grid...")
     try:
         ds = load(
             [best],
@@ -247,6 +263,7 @@ def _download_sentinel2(
     blue = ds.blue.isel(time=0).values
     nir = ds.nir.isel(time=0).values
 
+    print(f"Sentinel-2: Loaded bands {bands_needed}, shape {red.shape}")
     return red, green, blue, nir
 
 

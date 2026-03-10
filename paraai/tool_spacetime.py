@@ -19,6 +19,11 @@ def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return haversine_m(lat1, lng1, lat2, lng2) / 1000
 
 
+def haversine_km_tuple(lat_lon_pair_1: tuple[float, float], lat_lon_pair_2: tuple[float, float]) -> float:
+    """Distance in km between two lat/lng points (haversine formula)."""
+    return haversine_m(lat_lon_pair_1[0], lat_lon_pair_1[1], lat_lon_pair_2[0], lat_lon_pair_2[1]) / 1000
+
+
 def utc_to_solar_hour(dt: datetime, longitude_deg: float) -> float:
     """Convert UTC to local solar hour (0-24) using longitude. 15° = 1 hour."""
     utc_hour_frac = dt.hour + dt.minute / 60 + dt.second / 3600

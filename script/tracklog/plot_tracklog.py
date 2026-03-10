@@ -29,8 +29,7 @@ async def plot_tracklog(tracklog_body: TracklogBody, short: bool = False):
 
     if short:
         fig, axes_dict = plt.subplot_mosaic(
-            [["track", "altitude", "heatmap"],
-             ["track", "turn", "heatmap"]],
+            [["track", "altitude", "heatmap"], ["track", "turn", "heatmap"]],
             figsize=(12, 6),
             gridspec_kw={"width_ratios": [1, 1, 1]},
         )
@@ -131,19 +130,31 @@ async def plot_tracklog(tracklog_body: TracklogBody, short: bool = False):
         ax3.plot(
             flight_time_s[start_idx : end_idx + 1],
             pd.array_tracklog_turn[start_idx : end_idx + 1],
-            color="yellow", linewidth=3, alpha=0.5, zorder=5, label="Climb" if i == 0 else None,
+            color="yellow",
+            linewidth=3,
+            alpha=0.5,
+            zorder=5,
+            label="Climb" if i == 0 else None,
         )
     for i, (start_idx, end_idx) in enumerate(progress_regions):
         ax3.plot(
             flight_time_s[start_idx : end_idx + 1],
             pd.array_tracklog_turn[start_idx : end_idx + 1],
-            color="cyan", linewidth=3, alpha=0.5, zorder=5, label="Progress" if i == 0 else None,
+            color="cyan",
+            linewidth=3,
+            alpha=0.5,
+            zorder=5,
+            label="Progress" if i == 0 else None,
         )
     for i, (start_idx, end_idx) in enumerate(exploration_regions):
         ax3.plot(
             flight_time_s[start_idx : end_idx + 1],
             pd.array_tracklog_turn[start_idx : end_idx + 1],
-            color="red", linewidth=3, alpha=0.5, zorder=5, label="Exploration" if i == 0 else None,
+            color="red",
+            linewidth=3,
+            alpha=0.5,
+            zorder=5,
+            label="Exploration" if i == 0 else None,
         )
 
     ax3.set_xlim(flight_time_s.min(), flight_time_s.max())
@@ -158,12 +169,19 @@ async def plot_tracklog(tracklog_body: TracklogBody, short: bool = False):
 
     # Plot climb rate vs altitude (heatmap rotated 90°: climb rate on x, altitude on y)
     extent = [
-        pd.heatmap_y_edges[0], pd.heatmap_y_edges[-1],  # x = climb rate
-        pd.heatmap_x_edges[0], pd.heatmap_x_edges[-1],  # y = altitude
+        pd.heatmap_y_edges[0],
+        pd.heatmap_y_edges[-1],  # x = climb rate
+        pd.heatmap_x_edges[0],
+        pd.heatmap_x_edges[-1],  # y = altitude
     ]
     ax4.imshow(
-        pd.hist_normalized, origin="lower", aspect="auto", extent=extent,
-        cmap="viridis", interpolation="bilinear", vmax=pd.heatmap_vmax,
+        pd.hist_normalized,
+        origin="lower",
+        aspect="auto",
+        extent=extent,
+        cmap="viridis",
+        interpolation="bilinear",
+        vmax=pd.heatmap_vmax,
     )
     ax4.set_xlabel("Climb Rate (m/s)")
     ax4.set_ylabel("Altitude (m)")
@@ -262,7 +280,7 @@ if __name__ == "__main__":
     # tracklog_body = asyncio.run(repository_tracklog_body.asample(1))[0]
     # print(tracklog_body.tracklog_id)
 
-    path_file_igc = args.igc_file or Path("C:\\project\\data\\glide-data\\tracklog_kozzion\\2025-10-17-XCT-JOO-05.igc")
+    path_file_igc = args.igc_file or Path("data", "input", "tracklog", "2025-10-17-XCT-JOO-05.igc")
 
     tracklog_header, tracklog_body = parse_igc_bytes(path_file_igc.name, path_file_igc.read_bytes())
 

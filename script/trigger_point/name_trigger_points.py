@@ -11,7 +11,7 @@ from paraai.tool_spacetime import haversine_m
 
 async def name_trigger_points(tuples: list[tuple[str, float, float]]) -> None:
     """For each (name, lat, lon), find the closest trigger point in the repo and set its name."""
-    repo = RepositoryTriggerPoint.initialize_sqlite(Path("data", "trigger_points"))
+    repo = RepositoryTriggerPoint.initialize_sqlite(Path("data", "database_sqlite"))
     all_tps = repo.get_all()
     if not all_tps:
         print("No trigger points in repository")
@@ -29,5 +29,6 @@ if __name__ == "__main__":
     tuples: list[tuple[str, float, float]] = [
         ("sopot_house_a", 42.685910, 24.750476),
         ("sopot_p1_a", 42.695861, 24.768874),
+        ("bir_house_a", 32.0598, 76.744566),
     ]
     asyncio.run(name_trigger_points(tuples))

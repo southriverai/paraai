@@ -15,6 +15,15 @@ from paraai.tools_terrain import load_terrain
 LAT = 42.685910
 LON = 24.750476
 
+
+# 18°17'52.2"S
+# 31°33'28.3"E
+
+# Example: a point in zimbabe
+LAT = -18.297833
+LON = 31.557861
+
+
 # Bounding box: ~2 km around the point (roughly 0.02 degrees)
 LON_MIN = LON - 0.01
 LAT_MIN = LAT - 0.01

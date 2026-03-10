@@ -1,70 +1,103 @@
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone
+import argparse
+import contextlib
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import contextily as cx
 import matplotlib.pyplot as plt
 
 from paraai.repository.repository_trigger_point import RepositoryTriggerPoint
+from paraai.tool_spacetime import haversine_km
+
+if TYPE_CHECKING:
+    from paraai.model.trigger_point import TriggerPoint
 
 
-async def show_trigger_point(repo_trigger_point: RepositoryTriggerPoint, trigger_point_id: str) -> None:
-    trigger_point = repo_trigger_point.get(trigger_point_id)
-    if trigger_point is None:
+def show_trigger_points(trigger_points: list[TriggerPoint]) -> None:
+    """Show trigger points by lat/lon with cartographic basemap."""
+    if not trigger_points:
         return
-    climbs = trigger_point.climbs
-    print(f"{trigger_point.name} ({trigger_point_id}): {len(climbs)} climbs within {trigger_point.radius_m/1000:.1f} km")
+    lats = [tp.lat for tp in trigger_points]
+    lons = [tp.lon for tp in trigger_points]
+    names = [tp.name for tp in trigger_points]
 
-    # Scatter plots: time of day vs strength, day of year vs strength, strength vs max altitude
-    time_strength: list[tuple[float, float]] = []
-    doy_strength: list[tuple[float, float]] = []
-    strength_alt_pairs: list[tuple[float, float]] = []
-    for c in climbs:
-        dt = datetime.fromtimestamp(c.start_timestamp_utc, tz=timezone.utc)
-        time_h = dt.hour + dt.minute / 60 + dt.second / 3600
-        doy = dt.timetuple().tm_yday - 1  # 0-364
-        s = c.climb_strength_m_s()
-        if s is not None:
-            time_strength.append((time_h, s))
-            doy_strength.append((doy, s))
-            strength_alt_pairs.append((s, c.end_alt_m))
-
-    fig2, axes = plt.subplots(1, 3, figsize=(14, 5))
-    if time_strength:
-        times, strengths = zip(*time_strength)
-        axes[0].scatter(times, strengths, s=4, alpha=0.5)
-    axes[0].set_xlabel("Time of day (h)")
-    axes[0].set_ylabel("Climb strength (m/s)")
-    axes[0].set_title(f"{trigger_point.name}: time of day vs strength (n={len(time_strength)})")
-    axes[0].set_xlim(0, 24)
-    axes[0].grid(True, alpha=0.3)
-
-    if doy_strength:
-        doys, strengths = zip(*doy_strength)
-        axes[1].scatter(doys, strengths, s=4, alpha=0.5)
-    axes[1].set_xlabel("Day of year")
-    axes[1].set_ylabel("Climb strength (m/s)")
-    axes[1].set_title(f"{trigger_point.name}: day of year vs strength (n={len(doy_strength)})")
-    axes[1].set_xlim(0, 365)
-    axes[1].grid(True, alpha=0.3)
-
-    if strength_alt_pairs:
-        strengths, max_alts = zip(*strength_alt_pairs)
-        axes[2].scatter(strengths, max_alts, s=4, alpha=0.5)
-        axes[2].set_xlabel("Climb strength (m/s)")
-        axes[2].set_ylabel("Max climb altitude (m)")
-        axes[2].set_title(f"{trigger_point.name}: max altitude vs strength (n={len(strength_alt_pairs)})")
-        axes[2].grid(True, alpha=0.3)
-    else:
-        axes[2].set_xlabel("Climb strength (m/s)")
-        axes[2].set_ylabel("Max climb altitude (m)")
-        axes[2].set_title(f"{trigger_point.name}: max altitude vs strength (no data)")
+    fig, ax = plt.subplots(figsize=(10, 8))
+    # x=lon, y=lat for correct basemap alignment (EPSG:4326)
+    ax.scatter(lons, lats, s=50, alpha=0.7, zorder=5)
+    for lat, lon, name in zip(lats, lons, names):
+        if not name.lower().startswith("kk"):
+            ax.annotate(name, (lon, lat), xytext=(5, 5), textcoords="offset points", fontsize=8, zorder=6)
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title("Trigger points")
+    pad_lon = max(0.05, (max(lons) - min(lons)) * 0.1) if lons else 0.05
+    pad_lat = max(0.05, (max(lats) - min(lats)) * 0.1) if lats else 0.05
+    ax.set_xlim(min(lons) - pad_lon, max(lons) + pad_lon)
+    ax.set_ylim(min(lats) - pad_lat, max(lats) + pad_lat)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.3)
+    with contextlib.suppress(Exception):
+        cx.add_basemap(ax, crs="EPSG:4326", alpha=0.6)
     plt.tight_layout()
 
 
-if __name__ == "__main__":
-    repo_trigger_point = RepositoryTriggerPoint.initialize_sqlite(Path("data", "trigger_points"))
-    for trigger_point_id in repo_trigger_point.get_all_ids():
-        asyncio.run(show_trigger_point(repo_trigger_point, trigger_point_id))
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--trigger_point_id", type=str, help="Trigger point ID")
+    parser.add_argument("--name", type=str, help="Trigger point name")
+    parser.add_argument("--all", action="store_true", help="Show all trigger points")
+    parser.add_argument("radius_km", nargs="?", type=float, help="Show trigger points within N km of the specified point")
+    return parser.parse_args()
+
+    # example usage:
+    # python script/trigger_point/show_trigger_points.py --name "sopot_house_a" 500
+    # python script/trigger_point/show_trigger_points.py --trigger_point_id "sopot_house_a" 500
+    # python script/trigger_point/show_trigger_points.py --all
+
+
+def main() -> None:
+    args = parse_args()
+    repo_trigger_point = RepositoryTriggerPoint.initialize_sqlite(Path("data", "database_sqlite"))
+
+    # Select trigger point IDs to show
+    ids_to_show: list[str] = []
+    if args.name:
+        center = repo_trigger_point.get_by_name(args.name)
+        if center is not None:
+            ids_to_show = [center.trigger_point_id]
+        else:
+            print(f"No trigger point found with name '{args.name}'")
+    elif args.trigger_point_id:
+        center = repo_trigger_point.get(args.trigger_point_id)
+        if center is not None:
+            ids_to_show = [args.trigger_point_id]
+        else:
+            print(f"No trigger point found with id '{args.trigger_point_id}'")
+    else:
+        ids_to_show = repo_trigger_point.get_all_ids()
+
+    trigger_points = repo_trigger_point.get_by_ids(ids_to_show)
+
+    # Filter by radius if specified (requires --name or --trigger_point_id)
+    if args.radius_km is not None:
+        if not args.name and not args.trigger_point_id:
+            print("radius_km requires --name or --trigger_point_id")
+            return
+        if not trigger_points:
+            return
+        center = trigger_points[0]
+        all_tps = repo_trigger_point.get_all()
+        trigger_points = [
+            tp for tp in all_tps
+            if haversine_km(center.lat, center.lon, tp.lat, tp.lon) <= args.radius_km
+        ]
+        print(f"Showing {len(trigger_points)} trigger points within {args.radius_km} km of {center.name}")
+
+    show_trigger_points(trigger_points)
     plt.show()
+
+
+if __name__ == "__main__":
+    main()

@@ -11,7 +11,7 @@ import pandas as pd
 from paraai.model.trigger_point import TriggerPoint
 from paraai.repository.repository_trigger_point import RepositoryTriggerPoint
 
-CSV_PATH = Path("data", "source", "hotspots_kk7_all_all_20250301.csv")
+CSV_PATH = Path("data", "input", "hotspots_kk7_all_all_20250301.csv")
 RADIUS_M = 250.0
 
 
@@ -49,8 +49,7 @@ def load_trigger_points_from_csv(path: Path) -> list[TriggerPoint]:
 async def insert_trigger_points(trigger_points: list[TriggerPoint]) -> None:
     """Load SimpleClimbs within radius of each trigger point and insert."""
     repo_trigger_point = RepositoryTriggerPoint.initialize_sqlite(Path("data", "database_sqlite"))
-    for trigger_point in trigger_points:
-        repo_trigger_point.insert(trigger_point)
+    await repo_trigger_point.upsert_many(trigger_points)
 
 
 if __name__ == "__main__":
