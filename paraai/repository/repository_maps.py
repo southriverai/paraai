@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from paraai.map.vectror_map_array import VectorMapArray
+from paraai.model.boundingbox import BoundingBox
 from paraai.tools_map import load_map, save_map
 
 
@@ -34,10 +35,7 @@ class RepositoryMaps:
         self,
         generator_name: str,
         map_name: str,
-        lat_min: float,
-        lat_max: float,
-        lon_min: float,
-        lon_max: float,
+        bounding_box: BoundingBox,
         **params: object,
     ) -> VectorMapArray | None:
         """Load map from cache if it exists."""
@@ -45,10 +43,7 @@ class RepositoryMaps:
             self.cache_dir,
             generator_name,
             map_name,
-            lat_min,
-            lat_max,
-            lon_min,
-            lon_max,
+            bounding_box,
             **params,
         )
 
@@ -57,10 +52,7 @@ class RepositoryMaps:
         vma: VectorMapArray,
         generator_name: str,
         map_name: str | None = None,
-        lat_min: float | None = None,
-        lat_max: float | None = None,
-        lon_min: float | None = None,
-        lon_max: float | None = None,
+        bounding_box: BoundingBox | None = None,
         **params: object,
     ) -> Path:
         """Save map to cache. Returns path to saved file."""
@@ -69,9 +61,6 @@ class RepositoryMaps:
             self.cache_dir,
             generator_name,
             map_name=map_name,
-            lat_min=lat_min,
-            lat_max=lat_max,
-            lon_min=lon_min,
-            lon_max=lon_max,
+            bounding_box=bounding_box,
             **params,
         )

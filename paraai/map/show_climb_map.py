@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 def show_climb_map(
     elevation: np.ndarray,
     extent: list[float],
-    count_grid: np.ndarray,
+    count_grid: dict[str, np.ndarray],
     strength_grid: np.ndarray,
     *,
     title: str | None = None,
@@ -42,8 +42,7 @@ def show_climb_map(
     """
     elev_display = np.flipud(
         np.clip(
-            (elevation - np.nanpercentile(elevation, 2))
-            / (np.nanpercentile(elevation, 98) - np.nanpercentile(elevation, 2) + 1e-10),
+            (elevation - np.nanpercentile(elevation, 2)) / (np.nanpercentile(elevation, 98) - np.nanpercentile(elevation, 2) + 1e-10),
             0,
             1,
         )
@@ -127,8 +126,7 @@ def show_flatland_map(
     """
     elev_display = np.flipud(
         np.clip(
-            (elevation - np.nanpercentile(elevation, 2))
-            / (np.nanpercentile(elevation, 98) - np.nanpercentile(elevation, 2) + 1e-10),
+            (elevation - np.nanpercentile(elevation, 2)) / (np.nanpercentile(elevation, 98) - np.nanpercentile(elevation, 2) + 1e-10),
             0,
             1,
         )
@@ -153,9 +151,7 @@ def show_flatland_map(
     fig.colorbar(im_std, ax=ax_std)
 
     ax_plan = fig.add_subplot(gs[1, :])
-    im_plan = ax_plan.imshow(
-        planarity_grid, extent=extent, origin="lower", cmap="plasma", vmin=0, vmax=1
-    )
+    im_plan = ax_plan.imshow(planarity_grid, extent=extent, origin="lower", cmap="plasma", vmin=0, vmax=1)
     ax_plan.set_xlabel("Longitude")
     ax_plan.set_ylabel("Latitude")
     ax_plan.set_aspect("equal")

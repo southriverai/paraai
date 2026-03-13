@@ -10,6 +10,7 @@ import rasterio.transform
 
 from paraai.map.map_builder_base import MapBuilderBase
 from paraai.map.vectror_map_array import VectorMapArray
+from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_terrain import RepositoryTerrain
 
 logger = logging.getLogger(__name__)
@@ -21,21 +22,18 @@ class MapBuilderAverage(MapBuilderBase):
 
     def _build_impl(
         self,
-        lat_min: float,
-        lat_max: float,
-        lon_min: float,
-        lon_max: float,
+        bounding_box: BoundingBox,
         df: pd.DataFrame,
     ) -> dict[str, VectorMapArray]:
         """Build estimated climb map from DataFrame with columns lat and lon (and optionally count, strength)."""
         if "lat" not in df.columns or "lon" not in df.columns:
             raise ValueError("DataFrame must have columns 'lat' and 'lon'")
-        count_col = "count" if "count" in df.columns else None
-        strength_col = "strength" if "strength" in df.columns else None
+        if "strength" not in df.columns:
+            raise ValueError("DataFrame must have column 'strength'")
 
         # Load DEM
         repo_terrain = RepositoryTerrain.get_instance()
-        terrain = repo_terrain.get_elevation(lon_min, lat_min, lon_max, lat_max)
+        terrain = repo_terrain.get_elevation(bounding_box)
         elevation = terrain["elevation"]
         transform = terrain["transform"]
         dem_shape = elevation.shape
@@ -46,29 +44,23 @@ class MapBuilderAverage(MapBuilderBase):
         count_grid = np.zeros(dem_shape, dtype=np.float32)
         for _, row in df.iterrows():
             lat, lon = row["lat"], row["lon"]
-            count = row[count_col] if count_col else 1.0
-            strength = row[strength_col] if strength_col else 0.0
             row_idx, col_idx = rasterio.transform.rowcol(transform, [lon], [lat])
             r, c = int(row_idx[0]), int(col_idx[0])
             if 0 <= r < strength_grid.shape[0] and 0 <= c < strength_grid.shape[1]:
-                strength_grid[r, c] = strength
-                count_grid[r, c] = count
+                strength_grid[r, c] += row["strength"]
+                count_grid[r, c] += 1
+
+        np.divide(strength_grid, count_grid, out=strength_grid, where=count_grid > 0)
 
         return {
             "strength": VectorMapArray(
                 "strength",
-                lat_min,
-                lat_max,
-                lon_min,
-                lon_max,
+                bounding_box,
                 strength_grid,
             ),
             "count": VectorMapArray(
                 "count",
-                lat_min,
-                lat_max,
-                lon_min,
-                lon_max,
+                bounding_box,
                 count_grid,
             ),
         }

@@ -38,10 +38,12 @@ def load_elevation(
 
     Returns dict with elevation, transform, crs.
     """
+    logger.info("Loading elevation for bbox: lon_min=%f, lat_min=%f, lon_max=%f, lat_max=%f", lon_min, lat_min, lon_max, lat_max)
     bbox = [lon_min, lat_min, lon_max, lat_max]
     cache = Path(cache_dir) if cache_dir else Path("data", "cache", "terrain")
     cache.mkdir(parents=True, exist_ok=True)
     dem_path = _download_dem(bbox, dem_resolution, cache)
+    logger.info("Elevation downloaded to %s", dem_path)
     with rasterio.open(dem_path) as dem_src:
         elevation = dem_src.read(1)
         transform = dem_src.transform
@@ -188,25 +190,41 @@ def _download_dem(
     resolution: int,
     cache_dir: Path | None,
 ) -> Path:
-    """Download Copernicus DEM for bbox, return path to GeoTIFF."""
-    from demloader.download import from_aws
-    from demloader.prefixes import get_from_aoi
-
     left, bottom, right, top = bbox
-    aoi = [left, bottom, right, top]
     bbox_str = f"lon={left:.4f}-{right:.4f}, lat={bottom:.4f}-{top:.4f}"
+    try:
+        from paraai.repository.repository_terrain import RepositoryTerrain
 
-    if cache_dir:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        h = _bbox_hash(bbox, resolution)
-        out_path = cache_dir / f"dem_{h}.tif"
+        repo = RepositoryTerrain.get_instance()
+        out_path = repo.get_dem_cache_path(bbox, resolution)
         if out_path.exists():
             print(f"DEM: Using cached {out_path.name} for bbox ({bbox_str}), {resolution}m resolution")
             return out_path
-    else:
-        h = _bbox_hash(bbox, resolution)
-        out_path = Path(f"dem_{h}.tif")
+    except (ValueError, AttributeError):
+        pass
 
+    if out_path is None:
+        if cache_dir:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            h = _bbox_hash(bbox, resolution)
+            out_path = cache_dir / f"dem_{h}.tif"
+        else:
+            h = _bbox_hash(bbox, resolution)
+            out_path = Path(f"dem_{h}.tif")
+
+    aoi = [left, bottom, right, top]
+
+    """Download Copernicus DEM for bbox, return path to GeoTIFF."""
+    logger.info("Downloading Copernicus DEM for bbox: %s, %d m resolution", bbox_str, resolution)
+
+    from demloader.download import from_aws
+
+    logger.info("Downloading Copernicus DEM for bbox: %s, %d m resolution", bbox_str, resolution)
+    from demloader.prefixes import get_from_aoi
+
+    logger.info("Downloading Copernicus DEM for bbox: %s, %d m resolution", bbox_str, resolution)
+
+    out_path = None
     print(f"DEM: Downloading Copernicus DEM for bbox ({bbox_str}), {resolution}m resolution -> {out_path}")
     prefixes = get_from_aoi(aoi, resolution=resolution)
     print(f"DEM: Fetching from AWS ({len(prefixes)} tile(s))...")

@@ -9,6 +9,7 @@ from srai_store.store_provider_base import StoreProviderBase
 from srai_store.store_provider_sqlite import StoreProviderSqlite
 from tqdm import tqdm
 
+from paraai.model.boundingbox import BoundingBox
 from paraai.model.simple_climb import SimpleClimb
 from paraai.repository.repository_cache import RepositoryCache
 from paraai.tool_spacetime import haversine_m
@@ -93,8 +94,8 @@ class RepositorySimpleClimb:
         lat_deg_max: float,
         lng_deg_min: float,
         lng_deg_max: float,
-        verbose: bool = False,
         *,
+        verbose: bool = False,
         ignore_cache: bool = False,
     ) -> list[SimpleClimb]:
         query = {
@@ -105,38 +106,55 @@ class RepositorySimpleClimb:
 
     async def get_all_in_bounding_box_by_ground(
         self,
-        lat_deg_min: float,
-        lat_deg_max: float,
-        lng_deg_min: float,
-        lng_deg_max: float,
+        bounding_box: BoundingBox,
+        *,
         verbose: bool = False,
+        ignore_cache: bool = False,
     ) -> list[SimpleClimb]:
+        lat_deg_min = bounding_box.lat_min
+        lat_deg_max = bounding_box.lat_max
+        lng_deg_min = bounding_box.lon_min
+        lng_deg_max = bounding_box.lon_max
+        query = {
+            "ground_lat": {"$gte": bounding_box.lat_min, "$lte": bounding_box.lat_max},
+            "ground_lon": {"$gte": bounding_box.lon_min, "$lte": bounding_box.lon_max},
+        }
+        if not ignore_cache:
+            try:
+                repo_cache = RepositoryCache.get_instance()
+                key = self._query_cache_key(query)
+                cached = repo_cache.get(key)
+                if cached is not None and "climbs" in cached:
+                    climbs = [SimpleClimb.model_validate(d) for d in cached["climbs"]]
+                    logger.debug("Loaded %d climbs from query cache (bbox_ground)", len(climbs))
+                    return climbs
+            except Exception as e:
+                logger.debug("Query cache miss or error: %s", e)
+
         keys = list(self.store.yield_keys())
         results: list[SimpleClimb] = []
-
+        batch_size = 1000  # seems to be differnt for different queries
         iterator = (
-            tqdm(range(0, len(keys), self.BATCH_SIZE), desc="Loading climbs", unit="batch")
-            if verbose
-            else range(0, len(keys), self.BATCH_SIZE)
+            tqdm(range(0, len(keys), batch_size), desc="Loading climbs", unit="batch") if verbose else range(0, len(keys), batch_size)
         )
         for i in iterator:
-            batch = keys[i : i + self.BATCH_SIZE]
+            batch = keys[i : i + batch_size]
             batch_results = self.store.mget(batch)
             filtered = [
                 c for c in batch_results if lat_deg_min <= c.ground_lat <= lat_deg_max and lng_deg_min <= c.ground_lon <= lng_deg_max
             ]
             results.extend(filtered)
-        return results
 
-    # async def get_all_in_bounding_box_by_ground(
-    #     self, lat_deg_min: float, lat_deg_max: float, lng_deg_min: float, lng_deg_max: float, verbose: bool = False
-    # ) -> list[SimpleClimb]:
-    #     """Query climbs whose ground point (trigger) is in the bounding box."""
-    #     query = {
-    #         "ground_lat": {"$gte": lat_deg_min, "$lte": lat_deg_max},
-    #         "ground_lon": {"$gte": lng_deg_min, "$lte": lng_deg_max},
-    #     }
-    #     return self._query_all(query, verbose)
+        if not ignore_cache:
+            try:
+                repo_cache = RepositoryCache.get_instance()
+                key = self._query_cache_key(query)
+                repo_cache.set(key, {"climbs": [c.model_dump() for c in results]})
+                logger.debug("Cached %d climbs for query (bbox_ground)", len(results))
+            except Exception as e:
+                logger.debug("Failed to cache query results: %s", e)
+
+        return results
 
     def _query_cache_key(self, query: dict) -> str:
         """Stable cache key from query dict."""
@@ -147,8 +165,8 @@ class RepositorySimpleClimb:
     def _query_all(
         self,
         query: dict,
-        verbose: bool = False,
         *,
+        verbose: bool = False,
         ignore_cache: bool = False,
     ) -> list[SimpleClimb]:
         """Query all matching climbs. Results are cached in RepositoryCache unless ignore_cache=True."""

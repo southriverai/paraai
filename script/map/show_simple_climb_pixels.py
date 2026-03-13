@@ -2,8 +2,8 @@
 Query SimpleClimbPixels in a region and show them over a height map.
 
 Example:
-  poetry run python script/simple_climb_pixel/show_simple_climb_pixels.py --region bassano
-  poetry run python script/simple_climb_pixel/show_simple_climb_pixels.py --region bassano --gaussian-sigma-m 100
+  poetry run python script/map/show_simple_climb_pixels.py --region bassano
+  poetry run python script/map/show_simple_climb_pixels.py --region bassano --gaussian-sigma-m 100
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import rasterio.transform
 from scipy.ndimage import convolve
 
 from paraai.map.show_climb_map import show_climb_map
+from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_simple_climb_pixel import RepositorySimpleClimbPixel
 from paraai.repository.repository_terrain import RepositoryTerrain
 from paraai.setup import setup
@@ -34,11 +35,12 @@ def show_region(
     save_slippy: str | None = None,
 ) -> None:
     """Load pixels in bbox, load elevation, plot together."""
+    bounding_box = BoundingBox(lat_min=lat_min, lat_max=lat_max, lon_min=lon_min, lon_max=lon_max)
     repo_pixel = RepositorySimpleClimbPixel.get_instance()
     repo_terrain = RepositoryTerrain.get_instance()
     pixels = repo_pixel.get_all_in_bounding_box(lat_min, lat_max, lon_min, lon_max)
     logger.info("Loaded %s SimpleClimbPixels in region", len(pixels))
-    terrain = repo_terrain.get_elevation(lon_min, lat_min, lon_max, lat_max)
+    terrain = repo_terrain.get_elevation(bounding_box)
     elevation = terrain["elevation"]
     transform = terrain["transform"]
 
@@ -83,6 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Show SimpleClimbPixels over height map")
     parser.add_argument("--region", type=str, help="Named region (bassano, sopot, bansko, europe)")
     parser.add_argument("--save-slippy", type=str, metavar="NAME", help="Export to slippy tiles (e.g. bassano)")
+    parser.add_argument("--gaussian-sigma-m", type=float, default=100, help="Gaussian blur sigma in meters")
     args = parser.parse_args()
     return args
 
@@ -93,14 +96,13 @@ def main() -> None:
     if bounds is None:
         raise ValueError(f"Unknown region '{args.region}'. Available: {list(REGION_BOUNDS)}")
     lat_min, lat_max, lon_min, lon_max = bounds
-    gaussian_sigma_m = 100
     show_region(
         lat_min,
         lat_max,
         lon_min,
         lon_max,
         region_name=args.region,
-        gaussian_sigma_m=gaussian_sigma_m,
+        gaussian_sigma_m=args.gaussian_sigma_m,
         save_slippy=args.save_slippy,
     )
 

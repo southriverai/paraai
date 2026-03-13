@@ -5,6 +5,8 @@ from datetime import datetime
 
 import numpy as np
 
+from paraai.model.boundingbox import BoundingBox
+
 # Europe bounds (lat min, lat max, lon min, lon max): ~Iberia to Nordkapp, Ireland to Urals
 EUROPE_BOUNDS: tuple[float, float, float, float] = (36.0, 72.0, -11.0, 42.0)
 
@@ -21,11 +23,11 @@ SOPOT_BOUNDS: tuple[float, float, float, float] = (42.4, 42.9, 24.4, 25.1)
 # Bansko, Bulgaria ~50km bbox
 BANSKO_BOUNDS: tuple[float, float, float, float] = (41.5, 42.2, 23.2, 23.8)
 
-REGION_BOUNDS: dict[str, tuple[float, float, float, float]] = {
-    "europe": EUROPE_BOUNDS,
-    "bassano": BASSANO_BOUNDS,
-    "sopot": SOPOT_BOUNDS,
-    "bansko": BANSKO_BOUNDS,
+REGION_BOUNDS: dict[str, BoundingBox] = {
+    "europe": BoundingBox(lat_min=EUROPE_BOUNDS[0], lat_max=EUROPE_BOUNDS[1], lon_min=EUROPE_BOUNDS[2], lon_max=EUROPE_BOUNDS[3]),
+    "bassano": BoundingBox(lat_min=BASSANO_BOUNDS[0], lat_max=BASSANO_BOUNDS[1], lon_min=BASSANO_BOUNDS[2], lon_max=BASSANO_BOUNDS[3]),
+    "sopot": BoundingBox(lat_min=SOPOT_BOUNDS[0], lat_max=SOPOT_BOUNDS[1], lon_min=SOPOT_BOUNDS[2], lon_max=SOPOT_BOUNDS[3]),
+    "bansko": BoundingBox(lat_min=BANSKO_BOUNDS[0], lat_max=BANSKO_BOUNDS[1], lon_min=BANSKO_BOUNDS[2], lon_max=BANSKO_BOUNDS[3]),
 }
 
 

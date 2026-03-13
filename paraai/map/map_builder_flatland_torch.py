@@ -1,4 +1,9 @@
-"""Map builder: flatland map from DEM using PyTorch GPU acceleration."""
+"""Map builder: flatland map from DEM using PyTorch GPU acceleration.
+
+IMPORTANT: Import this module only AFTER terrain/GDAL has run (e.g. after
+RepositoryTerrain.get_elevation). On Windows, importing torch before GDAL
+causes access violation (0xC0000005).
+"""
 
 from __future__ import annotations
 
@@ -13,6 +18,7 @@ from tqdm import tqdm
 
 from paraai.map.map_builder_base import MapBuilderBase
 from paraai.map.vectror_map_array import VectorMapArray
+from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_terrain import RepositoryTerrain
 from paraai.tool_spacetime import dem_pixel_size_m
 
@@ -40,15 +46,12 @@ class MapBuilderFlatlandTorch(MapBuilderBase):
 
     def _build_impl(
         self,
-        lat_min: float,
-        lat_max: float,
-        lon_min: float,
-        lon_max: float,
+        bounding_box: BoundingBox,
         df: pd.DataFrame,
     ) -> dict[str, VectorMapArray]:
         """Build flatland map from DEM. Returns std (m) and planarity [0,1] within radius_m."""
         _ = df  # unused
-        center_lat = (lat_min + lat_max) / 2
+        center_lat = (bounding_box.lat_min + bounding_box.lat_max) / 2
         width_m, height_m = dem_pixel_size_m(center_lat)
         radius_x = int(math.ceil(self.radius_m / width_m))
         radius_y = int(math.ceil(self.radius_m / height_m))
@@ -56,7 +59,7 @@ class MapBuilderFlatlandTorch(MapBuilderBase):
         size_y = 2 * radius_y + 1
 
         repo_terrain = RepositoryTerrain.get_instance()
-        terrain = repo_terrain.get_elevation(lon_min, lat_min, lon_max, lat_max)
+        terrain = repo_terrain.get_elevation(bounding_box)
         elevation = terrain["elevation"].astype(np.float32)
         elevation = np.nan_to_num(elevation, nan=0.0)
 
@@ -93,18 +96,12 @@ class MapBuilderFlatlandTorch(MapBuilderBase):
         return {
             "std": VectorMapArray(
                 "std",
-                lat_min,
-                lat_max,
-                lon_min,
-                lon_max,
+                bounding_box,
                 std_elev,
             ),
             "planarity": VectorMapArray(
                 "planarity",
-                lat_min,
-                lat_max,
-                lon_min,
-                lon_max,
+                bounding_box,
                 planarity,
             ),
         }

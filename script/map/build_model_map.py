@@ -217,13 +217,14 @@ def build_dataset_from_climb_map(
         grid_stride,
         kernel_size_m,
     )
-    bounds = REGION_BOUNDS.get(region.lower())
-    if bounds is None:
+    bounding_box = REGION_BOUNDS.get(region.lower())
+    if bounding_box is None:
         raise ValueError(f"Unknown region '{region}'. Available: {list(REGION_BOUNDS)}")
-    lat_min, lat_max, lon_min, lon_max = bounds
 
     repo_pixel = RepositorySimpleClimbPixel.get_instance()
-    pixels = repo_pixel.get_all_in_bounding_box(lat_min, lat_max, lon_min, lon_max)
+    pixels = repo_pixel.get_all_in_bounding_box(
+        bounding_box.lat_min, bounding_box.lat_max, bounding_box.lon_min, bounding_box.lon_max
+    )
     if len(pixels) < 1:
         raise ValueError(f"No SimpleClimbPixels in region '{region}'")
 
@@ -232,11 +233,11 @@ def build_dataset_from_climb_map(
         columns=["lat", "lon", "count", "strength"],
     )
     builder = MapBuilderConvolution(kernel_size_m=kernel_size_m)
-    maps = builder.build(lat_min, lat_max, lon_min, lon_max, df)
+    maps = builder.build(bounding_box, df)
     strength_vma = maps["strength"]
 
     repo_terrain = RepositoryTerrain.get_instance()
-    terrain = repo_terrain.get_elevation(lon_min, lat_min, lon_max, lat_max)
+    terrain = repo_terrain.get_elevation(bounding_box)
     elevation = terrain["elevation"]
     transform = terrain["transform"]
     h, w = elevation.shape
@@ -261,7 +262,7 @@ def build_dataset_from_climb_map(
             lon, lat = rasterio.transform.xy(transform, r, c)
             lon_val, lat_val = float(lon), float(lat)
             patch = _extract_elevation_patch(elevation, transform, lat_val, lon_val, patch_size_m, image_size)
-            raw_val = strength_vma.sample(lat_val, lon_val)
+            raw_val = strength_vma.get_value(lat_val, lon_val)
             norm_val = float(np.clip((raw_val - strength_lo) / (strength_hi - strength_lo), 0, 1))
             target = torch.full((1, image_size, image_size), norm_val, dtype=torch.float32)
             input_maps.append(patch)
@@ -281,10 +282,10 @@ def build_dataset_from_climb_map(
     viz_data = {
         "elevation": elevation,
         "transform": transform,
-        "lon_min": lon_min,
-        "lat_min": lat_min,
-        "lon_max": lon_max,
-        "lat_max": lat_max,
+        "lon_min": bounding_box.lon_min,
+        "lat_min": bounding_box.lat_min,
+        "lon_max": bounding_box.lon_max,
+        "lat_max": bounding_box.lat_max,
         "patch_size_m": patch_size_m,
         "image_size": image_size,
         "true_grid": true_grid,

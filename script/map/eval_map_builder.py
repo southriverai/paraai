@@ -26,6 +26,7 @@ from paraai.map.map_builder_average import MapBuilderAverage
 from paraai.map.map_builder_convolution import MapBuilderConvolution
 from paraai.map.map_builder_flatland_torch import MapBuilderFlatlandTorch
 from paraai.map.show_climb_map import show_climb_map
+from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_simple_climb import RepositorySimpleClimb
 from paraai.repository.repository_terrain import RepositoryTerrain
 from paraai.setup import setup
@@ -35,103 +36,62 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Test all map builders and show best result")
-    parser.add_argument("--region", type=str, default="bassano", help="Region (bassano, sopot, bansko, europe)")
-    parser.add_argument("--holdout-ratio", type=float, default=0.1, help="Fraction of pixels held out for evaluation")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for holdout split")
-    return parser.parse_args()
+def partition_dataframe(
+    df: pd.DataFrame,
+    holdout_ratio: float,
+    *,
+    seed: int = 42,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split dataframe into train and holdout by holdout_ratio. Uses seed for reproducibility."""
+    if len(df) == 0:
+        return df.copy(), df.copy()
+    rng = random.Random(seed)
+    indices = df.index.tolist()
+    rng.shuffle(indices)
+    n_holdout = max(1, int(len(indices) * holdout_ratio))
+    holdout_idx = indices[:n_holdout]
+    train_idx = indices[n_holdout:]
+    return df.loc[train_idx].reset_index(drop=True), df.loc[holdout_idx].reset_index(drop=True)
 
 
-async def main() -> None:
-    args = parse_args()
-
-    bounds = REGION_BOUNDS.get(args.region.lower())
-    if bounds is None:
-        raise ValueError(f"Unknown region '{args.region}'. Available: {list(REGION_BOUNDS)}")
-    lat_min, lat_max, lon_min, lon_max = bounds
-
+async def main(region_name: str, bounding_box: BoundingBox) -> None:
     repo_climb = RepositorySimpleClimb.get_instance()
-    climbs = await repo_climb.get_all_in_bounding_box(lat_min, lat_max, lon_min, lon_max, verbose=True)
+    repo_terrain = RepositoryTerrain.get_instance()
+
+    climbs = await repo_climb.get_all_in_bounding_box_by_ground(
+        bounding_box,
+        verbose=True,
+    )
     # build a dataframe from the climbs
     climbs_df = pd.DataFrame(
         [(p.ground_lat, p.ground_lon, p.climb_strength_m_s) for p in climbs],
         columns=["lat", "lon", "strength"],
     )
-    logger.info("Loaded %d SimpleClimbs in %s", len(climbs), args.region)
-
-    if len(climbs) < 1:
-        logger.warning("No pixels in region")
-        return
+    logger.info("Loaded %d SimpleClimbs in %s", len(climbs), region_name)
 
     # build flatland map
     builder_flatland = MapBuilderFlatlandTorch()
-    flatland_map = builder_flatland.build(
-        lat_min,
-        lat_max,
-        lon_min,
-        lon_max,
-    )
+    flatland_maps = builder_flatland.build(bounding_box, None)
+
+    terrain = repo_terrain.get_elevation(bounding_box)
+    elevation = terrain["elevation"].astype(np.float32)
+    elevation = np.nan_to_num(elevation, nan=0.0)
 
     # add the planarity to the dataframe
-    climbs_df["planarity"] = flatland_map["planarity"].array[climbs_df["lat"].values, climbs_df["lon"].values]
+    climbs_df["planarity"] = flatland_maps["planarity"].get_values(climbs_df["lat"].values, climbs_df["lon"].values)
 
-    # remove all simple climbs from the dataframe that are in land with planarity < 0.5
-    climbs_df = climbs_df[climbs_df["planarity"] >= 0.5]
+    # remove all simple climbs from the dataframe that are in land with planarity > 0.5
+    climbs_df_no_flatland = climbs_df[climbs_df["planarity"] <= 0.5]
 
-    logger.info("Removed %d SimpleClimbs in land with planarity < 0.5", len(pixels) - len(pixels))
+    removed = len(climbs_df) - len(climbs_df_no_flatland)
+    pct = 100.0 * removed / len(climbs_df) if len(climbs_df) > 0 else 0.0
+    logger.info("Removed %d SimpleClimbs in land with planarity < 0.5 (%.1f%%)", removed, pct)
 
-    # create average map with the remaining pixels
-    builder_average = MapBuilderAverage()
-    average_map = builder_average.build(lat_min, lat_max, lon_min, lon_max, climbs_df)
-
-    # show the strength and count map
-    show_climb_map(
-        elevation,
-        extent,
-        average_map["count"].array,
-        average_map["strength"].array,
-        title=f"Average map: {args.region} (n_train={len(train_pixels)}, n_holdout={len(holdout_pixels)})",
-        count_title="Climb count by pixel (Average)",
-        strength_title="Mean climb strength by pixel (Average)",
-    )
-
-    # split the pixels into train and holdout
-    rng = random.Random(args.seed)
-    shuffled = pixels.copy()
-    rng.shuffle(shuffled)
-    n_holdout = max(1, int(len(shuffled) * args.holdout_ratio))
-    holdout_pixels = shuffled[:n_holdout]
-    train_pixels = shuffled[n_holdout:]
-
-    # create the train and holdout dataframes
-    train_df = pd.DataFrame(
-        [(p.lat, p.lon, p.climb_count, p.mean_climb_strength_m_s) for p in train_pixels],
-        columns=["lat", "lon", "count", "strength"],
-    )
-    holdout_df = pd.DataFrame(
-        [(p.lat, p.lon, p.climb_count, p.mean_climb_strength_m_s) for p in holdout_pixels],
-        columns=["lat", "lon", "count", "strength"],
-    )
+    # partition the dataframe into train and holdout (use flatland-filtered climbs)
+    train_df, holdout_df = partition_dataframe(climbs_df_no_flatland, args.holdout_ratio, seed=args.seed)
 
     # show the train and holdout dataframes
     logger.info("Train dataframe: %s", train_df.head())
-    # Same pixel split for all builders
-    rng = random.Random(args.seed)
-    shuffled = pixels.copy()
-    rng.shuffle(shuffled)
-    n_holdout = max(1, int(len(shuffled) * args.holdout_ratio))
-    holdout_pixels = shuffled[:n_holdout]
-    train_pixels = shuffled[n_holdout:]
-
-    train_df = pd.DataFrame(
-        [(p.lat, p.lon, p.climb_count, p.mean_climb_strength_m_s) for p in train_pixels],
-        columns=["lat", "lon", "count", "strength"],
-    )
-    holdout_df = pd.DataFrame(
-        [(p.lat, p.lon, p.climb_count, p.mean_climb_strength_m_s) for p in holdout_pixels],
-        columns=["lat", "lon", "count", "strength"],
-    )
 
     # All builder configs: (display_name, builder_instance)
     configs = [
@@ -145,27 +105,24 @@ async def main() -> None:
     results: list[tuple[str, object, dict]] = []
 
     for display_name, builder in configs:
-        maps = builder.build(lat_min, lat_max, lon_min, lon_max, train_df)
+        maps = builder.build(bounding_box, train_df)
         count_vma = maps["count"]
         strength_vma = maps["strength"]
         eval_result = builder.evaluate(
-            count_vma,
             strength_vma,
             holdout_df,
+            column_name="strength",
             n_train=len(train_df),
         )
         results.append((display_name, eval_result, {"count_vma": count_vma, "strength_vma": strength_vma}))
 
     # Print all eval results
     print("\n" + "=" * 60)
-    print(f"Map builder evaluation results (same split, n_train={len(train_pixels)}, n_holdout={len(holdout_pixels)})")
+    print(f"Map builder evaluation results (same split, n_train={len(train_df)}, n_holdout={len(holdout_df)})")
     print("=" * 60)
     for display_name, eval_result, _ in results:
-        print(f"\n--- {display_name} ---")
-        print(f"  count_mae:    {eval_result.count_mae:.4f}")
-        print(f"  count_rmse:   {eval_result.count_rmse:.4f}")
-        print(f"  strength_mae: {eval_result.strength_mae:.4f} m/s")
-        print(f"  strength_rmse: {eval_result.strength_rmse:.4f} m/s")
+        print(display_name)
+        print(f"  strength_mae={eval_result.strength_mae:.4f} m/s, strength_rmse={eval_result.strength_rmse:.4f} m/s")
     print("\n" + "=" * 60)
 
     # Best by strength_mae (lower is better)
@@ -175,8 +132,8 @@ async def main() -> None:
     print(f"\nBest: {best_name} (strength_mae={best_eval.strength_mae:.4f} m/s)\n")
 
     # Load terrain for chart
-    repo_terrain = RepositoryTerrain.get_instance()
-    terrain = repo_terrain.get_elevation(lon_min, lat_min, lon_max, lat_max)
+
+    terrain = repo_terrain.get_elevation(bounding_box)
     elevation = terrain["elevation"]
     transform = terrain["transform"]
     bounds_arr = rasterio.transform.array_bounds(elevation.shape[0], elevation.shape[1], transform)
@@ -190,12 +147,25 @@ async def main() -> None:
         extent,
         count_grid,
         strength_grid,
-        title=f"{best_name}: {args.region} (n_train={len(train_pixels)}, n_holdout={len(holdout_pixels)})",
+        title=f"{best_name}: {region_name} (n_train={len(train_df)}, n_holdout={len(holdout_df)})",
         count_title=f"Climb count by pixel ({best_name})",
         strength_title=f"Mean climb strength by pixel ({best_name})",
     )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Test all map builders and show best result")
+    parser.add_argument("--region", type=str, default="bassano", help="Region (bassano, sopot, bansko, europe)")
+    parser.add_argument("--holdout-ratio", type=float, default=0.1, help="Fraction of pixels held out for evaluation")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for holdout split")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = parse_args()
+    region_name = args.region
+    bounding_box = REGION_BOUNDS.get(region_name.lower())
+    if bounding_box is None:
+        raise ValueError(f"Unknown region '{region_name}'. Available: {list(REGION_BOUNDS)}")
     setup()
-    asyncio.run(main())
+    asyncio.run(main(region_name, bounding_box))

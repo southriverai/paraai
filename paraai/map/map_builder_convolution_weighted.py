@@ -11,6 +11,7 @@ from scipy.ndimage import convolve
 
 from paraai.map.map_builder_base import MapBuilderBase
 from paraai.map.vectror_map_array import VectorMapArray
+from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_terrain import RepositoryTerrain
 from paraai.tool_spacetime import build_gaussian_kernel_meters
 
@@ -39,10 +40,7 @@ class MapBuilderConvolutionWeighted(MapBuilderBase):
 
     def _build_impl(
         self,
-        lat_min: float,
-        lat_max: float,
-        lon_min: float,
-        lon_max: float,
+        bounding_box: BoundingBox,
         df: pd.DataFrame,
     ) -> dict[str, VectorMapArray]:
         """Build estimated climb map from DataFrame with columns lat and lon (and optionally count, strength) using Gaussian convolution."""
@@ -55,7 +53,7 @@ class MapBuilderConvolutionWeighted(MapBuilderBase):
 
         # Load DEM
         repo_terrain = RepositoryTerrain.get_instance()
-        terrain = repo_terrain.get_elevation(lon_min, lat_min, lon_max, lat_max)
+        terrain = repo_terrain.get_elevation(bounding_box)
         elevation = terrain["elevation"]
         transform = terrain["transform"]
 
@@ -81,8 +79,8 @@ class MapBuilderConvolutionWeighted(MapBuilderBase):
                 strength_grid[r, c] = strength
 
         # Convolve with Gaussian kernel, weighted by count
-        center_lat = (lat_min + lat_max) / 2
-        center_lon = (lon_min + lon_max) / 2
+        center_lat = (bounding_box.lat_min + bounding_box.lat_max) / 2
+        center_lon = (bounding_box.lon_min + bounding_box.lon_max) / 2
         kernel = build_gaussian_kernel_meters(self.kernel_size_m, center_lat, center_lon)
         logger.info("Convolution kernel: %s", kernel.shape)
 
@@ -103,18 +101,12 @@ class MapBuilderConvolutionWeighted(MapBuilderBase):
         return {
             "strength": VectorMapArray(
                 "strength",
-                lat_min,
-                lat_max,
-                lon_min,
-                lon_max,
+                bounding_box,
                 estimated_strength.astype(np.float32),
             ),
             "count": VectorMapArray(
                 "count",
-                lat_min,
-                lat_max,
-                lon_min,
-                lon_max,
+                bounding_box,
                 estimated_count.astype(np.float32),
             ),
         }

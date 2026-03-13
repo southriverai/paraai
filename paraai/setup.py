@@ -22,7 +22,6 @@ def setup_database():
     path_cache = Path("data", "database_cache")
     path_terrain = Path("data", "database_terrain")
     path_maps = Path("data", "database_maps")
-    logger.info(f"Database path: {path_sqlite}")
     RepositorySimpleClimb.initialize_sqlite(path_sqlite)
     RepositorySimpleClimbPixel.initialize_sqlite(path_sqlite)
     RepositoryCache.initialize(path_cache)
