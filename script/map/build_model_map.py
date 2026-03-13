@@ -1,4 +1,4 @@
-"""Train a CNN to estimate a target map from elevation patches using trigger point labels."""
+"""Train a CNN to estimate MapBuilderConvolution(200) strength map from elevation patches."""
 
 from __future__ import annotations
 
@@ -6,19 +6,22 @@ import argparse
 import copy
 import logging
 import math
-import random
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import rasterio
 import torch
 from torch import nn
 from torch.utils.data import Dataset
+from tqdm import tqdm
 
-from paraai.repository.repository_trigger_point import RepositoryTriggerPoint
-from paraai.tool_spacetime import haversine_km_tuple
-from paraai.tools_terrain import load_terrain
+from paraai.map.map_builder_convolution import MapBuilderConvolution
+from paraai.repository.repository_simple_climb_pixel import RepositorySimpleClimbPixel
+from paraai.repository.repository_terrain import RepositoryTerrain
+from paraai.setup import setup
+from paraai.tool_spacetime import REGION_BOUNDS
 
 logger = logging.getLogger(__name__)
 
@@ -195,131 +198,85 @@ def train_model(
     return model
 
 
-def _negative_samples_around_cluster(
-    lat_lon_pairs: list[tuple[float, float]],
-    negative_example_count: int,
-    min_distance_m: float,
-    max_distance_m: float,
-) -> list[tuple[float, float]]:
-    """Sample negative points at least min_distance_m from trigger points, within max_distance_m."""
-    logger.debug(
-        "_negative_samples_around_cluster(count=%s, min=%sm, max=%sm)",
-        negative_example_count,
-        min_distance_m,
-        max_distance_m,
-    )
-    out: list[tuple[float, float]] = []
-    min_distance_km = min_distance_m / 1000.0
-    deg_per_m = 1.0 / 111_000
-    while len(out) < negative_example_count:
-        trigger_point_lat, trigger_point_lon = random.choice(lat_lon_pairs)
-        offset_deg = max_distance_m * deg_per_m
-        lat = random.uniform(trigger_point_lat - offset_deg, trigger_point_lat + offset_deg)
-        lon_scale = 1.0 / (111_000 * math.cos(math.radians(trigger_point_lat)))
-        lon = random.uniform(
-            trigger_point_lon - max_distance_m * lon_scale,
-            trigger_point_lon + max_distance_m * lon_scale,
-        )
-        too_close = False
-        for lat_lon_pair in lat_lon_pairs:
-            if haversine_km_tuple(lat_lon_pair, (lat, lon)) < min_distance_km:
-                too_close = True
-                break
-        if too_close:
-            continue
-
-        out.append((lat, lon))
-
-    return out
-
-
-def get_bounding_box(lat_lon_pairs: list[tuple[float, float]], margin_m: float) -> tuple[float, float, float, float]:
-    """Get bounding box around lat_lon_pairs with margin_m in meters."""
-    lat_min = min(p[0] for p in lat_lon_pairs)
-    lat_max = max(p[0] for p in lat_lon_pairs)
-    lon_min = min(p[1] for p in lat_lon_pairs)
-    lon_max = max(p[1] for p in lat_lon_pairs)
-    center_lat = (lat_min + lat_max) / 2
-    deg_per_m_lat = 1.0 / 111_000
-    deg_per_m_lon = 1.0 / (111_000 * math.cos(math.radians(center_lat)))
-    margin_lat = margin_m * deg_per_m_lat
-    margin_lon = margin_m * deg_per_m_lon
-    return lat_min - margin_lat, lon_min - margin_lon, lat_max + margin_lat, lon_max + margin_lon
-
-
-def build_dataset_from_trigger_point_name(
-    trigger_point_name: str,
-    radius_km: float = 20.0,
+def build_dataset_from_climb_map(
+    region: str,
     patch_size_m: float = 500.0,
     image_size: int = 64,
-    cache_dir: Path | None = None,
+    grid_stride: int = 16,
+    kernel_size_m: float = 200.0,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], dict]:
-    margin_m = patch_size_m / 2.0
-
     """
-    Build (elevation_patches, target_maps) from trigger point name.
+    Build (elevation_patches, target_maps) from MapBuilderConvolution(kernel_size_m=200) strength map.
 
-    - Positive: all trigger points within radius_km of the named point.
-    - Negative: points east and west at center lat of trigger points.
+    Samples a grid of patches across the region. Target = strength value at patch center, normalized [0,1].
     """
     logger.info(
-        "build_dataset_from_trigger_point_name(name=%s, radius_km=%s, patch_size_m=%s)",
-        trigger_point_name,
-        radius_km,
+        "build_dataset_from_climb_map(region=%s, patch_size_m=%s, grid_stride=%s, kernel_size_m=%s)",
+        region,
         patch_size_m,
+        grid_stride,
+        kernel_size_m,
     )
-    repo = RepositoryTriggerPoint.get_instance()
-    center = repo.get_by_name(trigger_point_name)
-    if center is None:
-        raise ValueError(f"No trigger point found with name '{trigger_point_name}'")
+    bounds = REGION_BOUNDS.get(region.lower())
+    if bounds is None:
+        raise ValueError(f"Unknown region '{region}'. Available: {list(REGION_BOUNDS)}")
+    lat_min, lat_max, lon_min, lon_max = bounds
 
-    positives_tps = repo.get_all_within_radius(center.lat, center.lon, radius_km * 1000.0)
-    positives = [(tp.lat, tp.lon) for tp in positives_tps]
-    if not positives:
-        raise ValueError(f"No trigger points within {radius_km} km of '{trigger_point_name}'")
+    repo_pixel = RepositorySimpleClimbPixel.get_instance()
+    pixels = repo_pixel.get_all_in_bounding_box(lat_min, lat_max, lon_min, lon_max)
+    if len(pixels) < 1:
+        raise ValueError(f"No SimpleClimbPixels in region '{region}'")
 
-    negative_example_count = len(positives) * 10
-    min_distance_m = 250
-    max_distance_m = 2000
-    negatives = _negative_samples_around_cluster(positives, negative_example_count, min_distance_m, max_distance_m)
-
-    # Bbox for full region with padding
-    lat_min, lon_min, lat_max, lon_max = get_bounding_box(positives, margin_m=margin_m)
-
-    logger.info(
-        "Loading terrain for region (lat=%s-%s, lon=%s-%s)",
-        f"{lat_min:.4f}",
-        f"{lat_max:.4f}",
-        f"{lon_min:.4f}",
-        f"{lon_max:.4f}",
+    df = pd.DataFrame(
+        [(p.lat, p.lon, p.climb_count, p.mean_climb_strength_m_s) for p in pixels],
+        columns=["lat", "lon", "count", "strength"],
     )
-    terrain = load_terrain(
-        lon_min,
-        lat_min,
-        lon_max,
-        lat_max,
-        cache_dir=cache_dir or Path("data", "terrain"),
-    )
+    builder = MapBuilderConvolution(kernel_size_m=kernel_size_m)
+    maps = builder.build(lat_min, lat_max, lon_min, lon_max, df)
+    strength_vma = maps["strength"]
+
+    repo_terrain = RepositoryTerrain.get_instance()
+    terrain = repo_terrain.get_elevation(lon_min, lat_min, lon_max, lat_max)
     elevation = terrain["elevation"]
     transform = terrain["transform"]
+    h, w = elevation.shape
+
+    # Normalize strength to [0,1] using percentiles
+    strength_arr = strength_vma.array
+    valid = strength_arr[strength_arr > 0]
+    if valid.size > 0:
+        p2, p98 = np.percentile(valid, [2, 98])
+        strength_lo, strength_hi = float(p2), float(p98)
+    else:
+        strength_lo, strength_hi = 0.0, 1.0
+    if strength_hi <= strength_lo:
+        strength_hi = strength_lo + 1e-6
 
     input_maps: list[torch.Tensor] = []
     target_maps: list[torch.Tensor] = []
 
-    logger.debug("Extracting %s positive patches", len(positives))
-    for lat, lon in positives:
-        patch = _extract_elevation_patch(elevation, transform, lat, lon, patch_size_m, image_size)
-        input_maps.append(patch)
-        target_maps.append(torch.ones(1, image_size, image_size))
+    n_patches = 0
+    for r in range(0, h, grid_stride):
+        for c in range(0, w, grid_stride):
+            lon, lat = rasterio.transform.xy(transform, r, c)
+            lon_val, lat_val = float(lon), float(lat)
+            patch = _extract_elevation_patch(elevation, transform, lat_val, lon_val, patch_size_m, image_size)
+            raw_val = strength_vma.sample(lat_val, lon_val)
+            norm_val = float(np.clip((raw_val - strength_lo) / (strength_hi - strength_lo), 0, 1))
+            target = torch.full((1, image_size, image_size), norm_val, dtype=torch.float32)
+            input_maps.append(patch)
+            target_maps.append(target)
+            n_patches += 1
 
-    logger.debug("Extracting %s negative patches", len(negatives))
-    for lat, lon in negatives:
-        patch = _extract_elevation_patch(elevation, transform, lat, lon, patch_size_m, image_size)
-        input_maps.append(patch)
-        target_maps.append(torch.zeros(1, image_size, image_size))
+    logger.info("Dataset: %s patches from grid (stride=%s)", n_patches, grid_stride)
+    logger.info("Strength range: %.3f - %.3f m/s (normalized)", strength_lo, strength_hi)
 
-    logger.info("Dataset: %s positive, %s negative", len(positives), len(negatives))
-    logger.info("build_dataset_from_trigger_point_name finished")
+    # True grid for viz: strength in rasterio order
+    true_grid = np.clip(
+        (strength_arr.astype(np.float64) - strength_lo) / (strength_hi - strength_lo),
+        0,
+        1,
+    ).astype(np.float32)
 
     viz_data = {
         "elevation": elevation,
@@ -328,10 +285,11 @@ def build_dataset_from_trigger_point_name(
         "lat_min": lat_min,
         "lon_max": lon_max,
         "lat_max": lat_max,
-        "positives": positives,
-        "negatives": negatives,
         "patch_size_m": patch_size_m,
         "image_size": image_size,
+        "true_grid": true_grid,
+        "strength_lo": strength_lo,
+        "strength_hi": strength_hi,
     }
     return input_maps, target_maps, viz_data
 
@@ -340,12 +298,13 @@ def build_model(
     input_maps: list[torch.Tensor],
     target_maps: list[torch.Tensor],
     *,
-    epochs: int = 50,
+    epochs: int = 5,
     batch_size: int = 8,
     lr: float = 1e-3,
     test_frac: float = 0.2,
     split_seed: int = 42,
     return_model: str = "lowest_test",
+    model_path: Path | str | None = None,
 ) -> tuple[MapEstimateNet, float, list[int]]:
     """
     Train a CNN to estimate target map from elevation patches.
@@ -390,11 +349,10 @@ def build_model(
     logger.info("Return model: %s", return_model)
 
     best_test_loss = float("inf")
-    best_train_loss = float("inf")
     best_test_state: dict | None = None
-    best_train_state: dict | None = None
 
-    for epoch in range(epochs):
+    pbar = tqdm(range(epochs), desc="Training", unit="epoch")
+    for epoch in pbar:
         model.train()
         train_loss = 0.0
         n_train_batches = 0
@@ -429,26 +387,17 @@ def build_model(
         if test_loss < best_test_loss:
             best_test_loss = test_loss
             best_test_state = copy.deepcopy(model.state_dict())
-        if train_loss < best_train_loss:
-            best_train_loss = train_loss
-            best_train_state = copy.deepcopy(model.state_dict())
+            if model_path:
+                path = Path(model_path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                torch.save(best_test_state, path)
+                logger.info("Saved best model (test_loss=%.6f) to %s", best_test_loss, path)
 
-        if (epoch + 1) % 10 == 0 or epoch == 0:
-            logger.info(
-                "Epoch %s/%s  train_loss=%s  test_loss=%s",
-                epoch + 1,
-                epochs,
-                f"{train_loss:.6f}",
-                f"{test_loss:.6f}",
-            )
+        pbar.set_postfix(train_loss=f"{train_loss:.4f}", test_loss=f"{test_loss:.4f}")
 
     if return_model == "lowest_test" and best_test_state is not None:
         model.load_state_dict(best_test_state)
         logger.info("Loaded model with lowest test loss (%.6f)", best_test_loss)
-    elif return_model == "lowest_train" and best_train_state is not None:
-        model.load_state_dict(best_train_state)
-        logger.info("Loaded model with lowest train loss (%.6f)", best_train_loss)
-    # else "latest" - keep current model
 
     score = evaluate([])
     logger.info("build_model finished (score=%s)", score)
@@ -464,11 +413,10 @@ def visualize_region_and_prediction(
     input_maps: list[torch.Tensor] | None = None,
     target_maps: list[torch.Tensor] | None = None,
     test_indices: list[int] | None = None,
-    pred_stride: int = 128,
-    pred_margin_km: float | None = 10.0,
+    pred_stride: int = 16,
 ) -> None:
-    """Show region with trigger points and predicted map side by side."""
-    logger.info("visualize_region_and_prediction(pred_stride=%s, pred_margin_km=%s)", pred_stride, pred_margin_km)
+    """Show region with MapBuilderConvolution(200) strength map and CNN prediction."""
+    logger.info("visualize_region_and_prediction(pred_stride=%s)", pred_stride)
     logger.info("Inference on %s", device)
     elevation = viz_data["elevation"]
     transform = viz_data["transform"]
@@ -476,42 +424,14 @@ def visualize_region_and_prediction(
     lat_min = viz_data["lat_min"]
     lon_max = viz_data["lon_max"]
     lat_max = viz_data["lat_max"]
-    positives = viz_data["positives"]
-    negatives = viz_data["negatives"]
     patch_size_m = viz_data["patch_size_m"]
     image_size = viz_data["image_size"]
-
-    # Optionally crop to trigger region to limit patches
-    if pred_margin_km is not None and (positives or negatives):
-        from rasterio.windows import from_bounds
-
-        pts = positives + negatives
-        pt_lat_min = min(p[0] for p in pts)
-        pt_lat_max = max(p[0] for p in pts)
-        pt_lon_min = min(p[1] for p in pts)
-        pt_lon_max = max(p[1] for p in pts)
-        center_lat = (pt_lat_min + pt_lat_max) / 2
-        deg_per_km = 1.0 / 111.0
-        margin_deg_lat = pred_margin_km * deg_per_km
-        margin_deg_lon = pred_margin_km * deg_per_km / math.cos(math.radians(center_lat))
-        crop_lon_min = max(lon_min, pt_lon_min - margin_deg_lon)
-        crop_lon_max = min(lon_max, pt_lon_max + margin_deg_lon)
-        crop_lat_min = max(lat_min, pt_lat_min - margin_deg_lat)
-        crop_lat_max = min(lat_max, pt_lat_max + margin_deg_lat)
-        win = from_bounds(crop_lon_min, crop_lat_min, crop_lon_max, crop_lat_max, transform)
-        r0 = int(max(0, win.row_off))
-        c0 = int(max(0, win.col_off))
-        r1 = int(min(elevation.shape[0], win.row_off + win.height))
-        c1 = int(min(elevation.shape[1], win.col_off + win.width))
-        elevation = elevation[r0:r1, c0:c1].copy()
-        transform = rasterio.windows.transform(win, transform)
-        lon_min, lat_min, lon_max, lat_max = crop_lon_min, crop_lat_min, crop_lon_max, crop_lat_max
-        logger.info("Cropped to trigger region + %s km: %s x %s pixels", pred_margin_km, elevation.shape[0], elevation.shape[1])
+    true_grid = viz_data["true_grid"]
 
     h, w = elevation.shape
     extent = [lon_min, lon_max, lat_min, lat_max]
 
-    # Build prediction grid (sparse at stride, then interpolate to match true map resolution)
+    # Build prediction grid (sparse at stride, then interpolate)
     model.eval()
     stride = pred_stride
     n_rows = (h + stride - 1) // stride
@@ -525,7 +445,7 @@ def visualize_region_and_prediction(
         for ri, r in enumerate(range(0, h, stride)):
             for ci, c in enumerate(range(0, w, stride)):
                 lon, lat = rasterio.transform.xy(transform, r, c)
-                patch = _extract_elevation_patch(elevation, transform, lat, lon, patch_size_m, image_size)
+                patch = _extract_elevation_patch(elevation, transform, float(lat), float(lon), patch_size_m, image_size)
                 patch_batch = patch.unsqueeze(0).to(device)
                 pred = model(patch_batch)
                 val = pred[0, 0, image_size // 2, image_size // 2].item()
@@ -535,30 +455,9 @@ def visualize_region_and_prediction(
                     pct = 100 * done / n_patches
                     logger.info("Prediction progress: %s/%s (%.0f%%)", done, n_patches, pct)
 
-    # Interpolate to full resolution to match true map
     pred_t = torch.from_numpy(pred_sparse).unsqueeze(0).unsqueeze(0)
     pred_grid = nn.functional.interpolate(pred_t, size=(h, w), mode="bilinear", align_corners=False).squeeze().numpy().astype(np.float32)
     pred_grid = np.clip(pred_grid, 0, 1)
-
-    # Build true map: 1 at trigger points, 0 at negatives, 0.5 elsewhere
-    true_grid = np.full((h, w), 0.5, dtype=np.float32)
-    marker_radius = 2
-    for lat, lon in positives:
-        row, col = rasterio.transform.rowcol(transform, [lon], [lat])
-        r, c = int(row[0]), int(col[0])
-        for dr in range(-marker_radius, marker_radius + 1):
-            for dc in range(-marker_radius, marker_radius + 1):
-                rr, cc = r + dr, c + dc
-                if 0 <= rr < h and 0 <= cc < w:
-                    true_grid[rr, cc] = 1.0
-    for lat, lon in negatives:
-        row, col = rasterio.transform.rowcol(transform, [lon], [lat])
-        r, c = int(row[0]), int(col[0])
-        for dr in range(-marker_radius, marker_radius + 1):
-            for dc in range(-marker_radius, marker_radius + 1):
-                rr, cc = r + dr, c + dc
-                if 0 <= rr < h and 0 <= cc < w:
-                    true_grid[rr, cc] = 0.0
 
     from matplotlib.gridspec import GridSpec
 
@@ -569,12 +468,11 @@ def visualize_region_and_prediction(
     ax_true = fig.add_subplot(gs[1, 0])
     ax_pred = fig.add_subplot(gs[1, 1])
 
-    # Top left: histograms of test set predictions (positive vs negative)
-    preds_pos: list[float] = []
-    preds_neg: list[float] = []
+    # Top left: histogram of test set predictions vs targets
+    preds_test: list[float] = []
+    targets_test: list[float] = []
     if input_maps is not None and target_maps is not None and test_indices is not None:
         model.eval()
-        image_size = viz_data["image_size"]
         with torch.no_grad():
             for idx in test_indices:
                 inp = input_maps[idx].unsqueeze(0).to(device)
@@ -582,18 +480,16 @@ def visualize_region_and_prediction(
                 pred = model(inp)
                 val = pred[0, 0, image_size // 2, image_size // 2].item()
                 label = tgt[0, image_size // 2, image_size // 2].item()
-                if label >= 0.5:
-                    preds_pos.append(val)
-                else:
-                    preds_neg.append(val)
+                preds_test.append(val)
+                targets_test.append(label)
     bins = np.linspace(0, 1, 21)
-    if preds_pos:
-        ax_hist.hist(preds_pos, bins=bins, alpha=0.7, color="green", label="Positive", density=True)
-    if preds_neg:
-        ax_hist.hist(preds_neg, bins=bins, alpha=0.7, color="red", label="Negative", density=True)
-    ax_hist.set_xlabel("Prediction")
+    if preds_test:
+        ax_hist.hist(preds_test, bins=bins, alpha=0.7, color="blue", label="Predicted", density=True)
+    if targets_test:
+        ax_hist.hist(targets_test, bins=bins, alpha=0.5, color="green", label="Target", density=True)
+    ax_hist.set_xlabel("Strength (normalized)")
     ax_hist.set_ylabel("Density")
-    ax_hist.set_title("Test set predictions")
+    ax_hist.set_title("Test set: predicted vs target")
     ax_hist.legend()
     ax_hist.set_xlim(0, 1)
 
@@ -604,33 +500,22 @@ def visualize_region_and_prediction(
         1,
     )
     ax_elev.imshow(elev_display, extent=extent, origin="upper", cmap="terrain")
-    if positives:
-        lons_p = [p[1] for p in positives]
-        lats_p = [p[0] for p in positives]
-        ax_elev.scatter(lons_p, lats_p, c="red", s=30, marker="o", label="Trigger points", zorder=5)
-    if negatives:
-        lons_n = [p[1] for p in negatives]
-        lats_n = [p[0] for p in negatives]
-        ax_elev.scatter(lons_n, lats_n, c="blue", s=15, marker="x", label="Negative samples", zorder=4)
     ax_elev.set_title("Heightmap")
     ax_elev.set_xlabel("Longitude")
     ax_elev.set_ylabel("Latitude")
-    ax_elev.legend(loc="upper right", fontsize=8)
     ax_elev.set_aspect("equal")
 
-    # Row 2: true and predicted maps with viridis colormap
+    # Row 2: true (MapBuilderConvolution) and predicted strength maps
     im_true = ax_true.imshow(true_grid, extent=extent, origin="upper", cmap="viridis", vmin=0, vmax=1)
-    plt.colorbar(im_true, ax=ax_true)
-    ax_true.set_title("True labels")
+    plt.colorbar(im_true, ax=ax_true, label="Strength (normalized)")
+    ax_true.set_title("True: MapBuilderConvolution(200m)")
     ax_true.set_xlabel("Longitude")
     ax_true.set_ylabel("Latitude")
     ax_true.set_aspect("equal")
 
     im_pred = ax_pred.imshow(pred_grid, extent=extent, origin="upper", cmap="viridis", vmin=0, vmax=1)
-    if positives:
-        ax_pred.scatter(lons_p, lats_p, c="red", s=30, marker="o", zorder=5)
-    plt.colorbar(im_pred, ax=ax_pred, label="Predicted probability")
-    ax_pred.set_title("Predicted trigger map")
+    plt.colorbar(im_pred, ax=ax_pred, label="Predicted strength (normalized)")
+    ax_pred.set_title("Predicted strength map")
     ax_pred.set_xlabel("Longitude")
     ax_pred.set_ylabel("Latitude")
     ax_pred.set_aspect("equal")
@@ -641,67 +526,61 @@ def visualize_region_and_prediction(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train CNN from trigger point name (elevation + labels)")
-    parser.add_argument("--name", type=str, required=True, help="Trigger point name (center of region)")
-    parser.add_argument("--radius-km", type=float, default=20.0, help="Gather trigger points within N km")
+    parser = argparse.ArgumentParser(description="Train CNN to predict MapBuilderConvolution(200) strength from elevation patches")
+    parser.add_argument(
+        "--region",
+        type=str,
+        default="sopot",
+        help="Region (bassano, sopot, bansko, europe)",
+    )
     parser.add_argument("--patch-size-m", type=float, default=500.0, help="Patch size in meters")
     parser.add_argument("--image-size", type=int, default=64, help="Patch resolution")
-    parser.add_argument("--epochs", type=int, default=80)
+    parser.add_argument("--grid-stride", type=int, default=16, help="Stride for sampling grid (default 16)")
+    parser.add_argument("--kernel-size-m", type=float, default=200.0, help="MapBuilderConvolution kernel (default 200)")
+    parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--test-frac", type=float, default=0.2, help="Fraction of data for test set (default 0.2)")
+    parser.add_argument("--test-frac", type=float, default=0.2, help="Fraction of data for test set")
     parser.add_argument("--split-seed", type=int, default=42, help="Random seed for train/test split")
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
-        help="Logging level (default INFO)",
-    )
-    parser.add_argument(
-        "--pred-margin-km",
-        type=float,
-        default=10.0,
-        help="Crop prediction to trigger region + N km (default 10). Set to 0 for full region.",
+        help="Logging level",
     )
     parser.add_argument(
         "--pred-stride",
         type=int,
-        default=4,
-        help="Stride for prediction grid (default 128). Larger = fewer patches, faster.",
+        default=16,
+        help="Stride for prediction grid. Larger = fewer patches, faster.",
     )
     parser.add_argument(
         "--return-model",
         choices=["latest", "lowest_train", "lowest_test"],
         default="lowest_test",
-        help="Which model to return: latest, lowest_train, or lowest_test (default).",
+        help="Which model to return",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default="data/models/map_model.pt",
+        help="Path to save best model (default: data/models/map_model.pt)",
     )
     return parser.parse_args()
-
-
-def _setup_logging(level: str) -> None:
-    """Configure logging for the module."""
-    logging.basicConfig(
-        level=getattr(logging, level),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
 
 
 def main() -> None:
     """Main entry point: parse args, build dataset, train model, visualize."""
     args = parse_args()
-    _setup_logging(args.log_level)
 
     logger.info("main: starting")
-    logger.info("parse_args: name=%s, radius_km=%s, epochs=%s", args.name, args.radius_km, args.epochs)
+    logger.info("parse_args: region=%s, epochs=%s, kernel_size_m=%s", args.region, args.epochs, args.kernel_size_m)
 
-    logger.info("RepositoryTriggerPoint.initialize_sqlite")
-    RepositoryTriggerPoint.initialize_sqlite(Path("data", "database_sqlite"))
-
-    input_maps, target_maps, viz_data = build_dataset_from_trigger_point_name(
-        args.name,
-        radius_km=args.radius_km,
+    input_maps, target_maps, viz_data = build_dataset_from_climb_map(
+        args.region,
         patch_size_m=args.patch_size_m,
         image_size=args.image_size,
+        grid_stride=args.grid_stride,
+        kernel_size_m=args.kernel_size_m,
     )
 
     model, score, test_indices = build_model(
@@ -712,12 +591,12 @@ def main() -> None:
         test_frac=args.test_frac,
         split_seed=args.split_seed,
         return_model=args.return_model,
+        model_path=args.model_path,
     )
     logger.info("Training complete. Score=%s", f"{score:.4f}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Device: %s", device)
-    pred_margin = None if args.pred_margin_km <= 0 else args.pred_margin_km
     visualize_region_and_prediction(
         model,
         viz_data,
@@ -726,14 +605,10 @@ def main() -> None:
         target_maps=target_maps,
         test_indices=test_indices,
         pred_stride=args.pred_stride,
-        pred_margin_km=pred_margin,
     )
     logger.info("main: finished")
 
 
 if __name__ == "__main__":
+    setup()
     main()
-
-
-# bansko
-# bassano

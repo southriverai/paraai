@@ -63,8 +63,8 @@ def show_area_simple_climbs(name: str, lat_deg: float, lng_deg: float, radius_m:
     months: list[int] = []
     years: list[int] = []
     for c in in_radius:
-        s = c.climb_strength_m_s()
-        if s is not None:
+        s = c.climb_strength_m_s
+        if s > 0:
             strengths.append(s)
         dt = datetime.fromtimestamp(c.start_timestamp_utc, tz=timezone.utc)
         hours.append(utc_to_solar_hour(dt, lng_deg))

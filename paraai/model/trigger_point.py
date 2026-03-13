@@ -12,5 +12,6 @@ class TriggerPoint(BaseModel):
     name: str
     lat: float
     lon: float
+    altitude_m: float
     radius_m: float
     climbs: list[SimpleClimb]

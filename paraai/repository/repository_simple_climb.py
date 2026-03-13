@@ -1,14 +1,21 @@
+import hashlib
+import json
+import logging
 import math
 from pathlib import Path
 from typing import Optional
 
 from srai_store.store_provider_base import StoreProviderBase
 from srai_store.store_provider_sqlite import StoreProviderSqlite
+from tqdm import tqdm
 
 from paraai.model.simple_climb import SimpleClimb
+from paraai.repository.repository_cache import RepositoryCache
 from paraai.tool_spacetime import haversine_m
 
 METERS_PER_DEG_LAT = 111_000
+
+logger = logging.getLogger(__name__)
 
 
 class RepositorySimpleClimb:
@@ -27,7 +34,7 @@ class RepositorySimpleClimb:
 
     @staticmethod
     def initialize_sqlite(path_dir_database: Path) -> "RepositorySimpleClimb":
-        store_provider = StoreProviderSqlite("tracklogs", path_dir_database)
+        store_provider = StoreProviderSqlite("simple_climb", path_dir_database)
         return RepositorySimpleClimb.initialize(store_provider)
 
     @staticmethod
@@ -36,7 +43,7 @@ class RepositorySimpleClimb:
             raise ValueError("RepositorySimpleClimb not initialized")
         return RepositorySimpleClimb.instance
 
-    BATCH_SIZE = 500  # SQLite limit on bound parameters (~999)
+    BATCH_SIZE = 500_000  # SQLite limit on bound parameters (~999) # TODO this seems wrong
 
     def _climb_key(self, tracklog_id: str, start_timestamp_utc: int) -> str:
         return f"{tracklog_id}_{start_timestamp_utc}"
@@ -70,29 +77,113 @@ class RepositorySimpleClimb:
             batch = keys_to_delete[i : i + self.BATCH_SIZE]
             self.store.mdelete(batch)
 
-    async def get_all(self) -> list[SimpleClimb]:
+    async def get_all(self, verbose: bool = False) -> list[SimpleClimb]:
         keys = list(self.store.yield_keys())
         results: list[SimpleClimb] = []
         for i in range(0, len(keys), self.BATCH_SIZE):
+            if verbose:
+                logger.info(f"Querying {i} to {i + self.BATCH_SIZE}")
             batch = keys[i : i + self.BATCH_SIZE]
             results.extend(c for c in self.store.mget(batch) if c is not None)
         return results
 
     async def get_all_in_bounding_box(
-        self, lat_deg_min: float, lat_deg_max: float, lng_deg_min: float, lng_deg_max: float
+        self,
+        lat_deg_min: float,
+        lat_deg_max: float,
+        lng_deg_min: float,
+        lng_deg_max: float,
+        verbose: bool = False,
+        *,
+        ignore_cache: bool = False,
     ) -> list[SimpleClimb]:
         query = {
             "start_lat": {"$gte": lat_deg_min, "$lte": lat_deg_max},
             "start_lon": {"$gte": lng_deg_min, "$lte": lng_deg_max},
         }
+        return self._query_all(query, verbose=verbose, ignore_cache=ignore_cache)
+
+    async def get_all_in_bounding_box_by_ground(
+        self,
+        lat_deg_min: float,
+        lat_deg_max: float,
+        lng_deg_min: float,
+        lng_deg_max: float,
+        verbose: bool = False,
+    ) -> list[SimpleClimb]:
+        keys = list(self.store.yield_keys())
+        results: list[SimpleClimb] = []
+
+        iterator = (
+            tqdm(range(0, len(keys), self.BATCH_SIZE), desc="Loading climbs", unit="batch")
+            if verbose
+            else range(0, len(keys), self.BATCH_SIZE)
+        )
+        for i in iterator:
+            batch = keys[i : i + self.BATCH_SIZE]
+            batch_results = self.store.mget(batch)
+            filtered = [
+                c for c in batch_results if lat_deg_min <= c.ground_lat <= lat_deg_max and lng_deg_min <= c.ground_lon <= lng_deg_max
+            ]
+            results.extend(filtered)
+        return results
+
+    # async def get_all_in_bounding_box_by_ground(
+    #     self, lat_deg_min: float, lat_deg_max: float, lng_deg_min: float, lng_deg_max: float, verbose: bool = False
+    # ) -> list[SimpleClimb]:
+    #     """Query climbs whose ground point (trigger) is in the bounding box."""
+    #     query = {
+    #         "ground_lat": {"$gte": lat_deg_min, "$lte": lat_deg_max},
+    #         "ground_lon": {"$gte": lng_deg_min, "$lte": lng_deg_max},
+    #     }
+    #     return self._query_all(query, verbose)
+
+    def _query_cache_key(self, query: dict) -> str:
+        """Stable cache key from query dict."""
+        qstr = json.dumps(query, sort_keys=True)
+        h = hashlib.sha256(qstr.encode()).hexdigest()[:32]
+        return f"simple_climb_query_{h}"
+
+    def _query_all(
+        self,
+        query: dict,
+        verbose: bool = False,
+        *,
+        ignore_cache: bool = False,
+    ) -> list[SimpleClimb]:
+        """Query all matching climbs. Results are cached in RepositoryCache unless ignore_cache=True."""
+        if not ignore_cache:
+            try:
+                repo_cache = RepositoryCache.get_instance()
+                key = self._query_cache_key(query)
+                cached = repo_cache.get(key)
+                if cached is not None and "climbs" in cached:
+                    climbs = [SimpleClimb.model_validate(d) for d in cached["climbs"]]
+                    logger.debug("Loaded %d climbs from query cache", len(climbs))
+                    return climbs
+            except Exception as e:
+                logger.debug("Query cache miss or error: %s", e)
+
         results: list[SimpleClimb] = []
         skip = 0
         while True:
+            if verbose:
+                logger.info("Querying %s to %s", skip, skip + self.BATCH_SIZE)
             batch = self.store.query(query, None, self.BATCH_SIZE, skip)
             results.extend(batch)
             if len(batch) < self.BATCH_SIZE:
                 break
             skip += self.BATCH_SIZE
+
+        if not ignore_cache:
+            try:
+                repo_cache = RepositoryCache.get_instance()
+                key = self._query_cache_key(query)
+                repo_cache.set(key, {"climbs": [c.model_dump() for c in results]})
+                logger.debug("Cached %d climbs for query", len(results))
+            except Exception as e:
+                logger.debug("Failed to cache query results: %s", e)
+
         return results
 
     async def get_all_in_radius(self, lat_deg: float, lng_deg: float, radius_m: float) -> list[SimpleClimb]:
@@ -105,6 +196,13 @@ class RepositorySimpleClimb:
             if d <= radius_m:
                 results.append(c)
         return results
+
+    async def get_all_in_radius_by_ground(self, lat_deg: float, lng_deg: float, radius_m: float) -> list[SimpleClimb]:
+        """Query climbs whose ground point (trigger) is within radius."""
+        deg_lat = radius_m / METERS_PER_DEG_LAT
+        deg_lon = radius_m / (METERS_PER_DEG_LAT * math.cos(math.radians(lat_deg)))
+        bbox = await self.get_all_in_bounding_box_by_ground(lat_deg - deg_lat, lat_deg + deg_lat, lng_deg - deg_lon, lng_deg + deg_lon)
+        return [c for c in bbox if haversine_m(c.ground_lat, c.ground_lon, lat_deg, lng_deg) <= radius_m]
 
     async def asample(self, count: int) -> list[SimpleClimb]:
         """Randomly sample simple climbs. Returns up to count."""

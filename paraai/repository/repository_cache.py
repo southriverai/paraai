@@ -2,10 +2,26 @@
 
 import json
 from pathlib import Path
+from typing import Optional
 
 
 class RepositoryCache:
     """Cache dicts as JSON files in a directory."""
+
+    instance: Optional["RepositoryCache"] = None
+
+    @staticmethod
+    def initialize(path_dir: Path) -> "RepositoryCache":
+        if RepositoryCache.instance is not None:
+            raise ValueError("RepositoryCache already initialized")
+        RepositoryCache.instance = RepositoryCache(path_dir)
+        return RepositoryCache.instance
+
+    @staticmethod
+    def get_instance() -> "RepositoryCache":
+        if not hasattr(RepositoryCache, "instance") or RepositoryCache.instance is None:
+            raise ValueError("RepositoryCache not initialized")
+        return RepositoryCache.instance
 
     def __init__(self, path_dir: Path) -> None:
         self.path_dir = Path(path_dir)

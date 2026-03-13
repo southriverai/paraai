@@ -29,8 +29,8 @@ async def _sample_speeds_for_distribution() -> dict[int, list[float]]:
     climbs = await repo.asample(DISTRIBUTION_SAMPLE_SIZE)
     speeds_by_month: dict[int, list[float]] = defaultdict(list)
     for c in climbs:
-        v = c.climb_strength_m_s()
-        if v is not None:
+        v = c.climb_strength_m_s
+        if v > 0:
             month = datetime.fromtimestamp(c.start_timestamp_utc, tz=timezone.utc).month
             speeds_by_month[month].append(v)
     return dict(speeds_by_month)

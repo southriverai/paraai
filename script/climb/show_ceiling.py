@@ -32,8 +32,8 @@ def _gather_ceilings() -> list[dict]:
     ceilings: list[dict] = []
     for _, flight_climbs in tqdm(by_tracklog.items(), desc="Computing ceilings"):
         ceiling_m = max(c.end_alt_m for c in flight_climbs)
-        strengths = [c.climb_strength_m_s() for c in flight_climbs]
-        valid_strengths = [s for s in strengths if s is not None]
+        strengths = [c.climb_strength_m_s for c in flight_climbs]
+        valid_strengths = [s for s in strengths if s > 0]
         avg_climb_m_s = sum(valid_strengths) / len(valid_strengths) if valid_strengths else 0.0
         dt = datetime.fromtimestamp(flight_climbs[0].start_timestamp_utc, tz=timezone.utc)
         doy = min(dt.timetuple().tm_yday, 365) - 1  # 0-364

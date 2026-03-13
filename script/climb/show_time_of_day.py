@@ -145,8 +145,8 @@ def main() -> None:
 
         raw: dict[tuple[int, int], list[float]] = defaultdict(list)
         for c in tqdm(climbs, desc="Processing"):
-            strength = c.climb_strength_m_s()
-            if strength is None:
+            strength = c.climb_strength_m_s
+            if strength <= 0:
                 continue
             dt = datetime.fromtimestamp(c.start_timestamp_utc, tz=timezone.utc)
             solar_h = utc_to_solar_hour(dt, c.start_lon)

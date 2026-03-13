@@ -33,12 +33,14 @@ def load_trigger_points_from_csv(path: Path) -> list[TriggerPoint]:
         lat = float(row[lat_col])
         lon = float(row[lon_col])
         trigger_point_id = f"kk7_{latlon_hash(lat, lon)}"
+        altitude_m = float(row["altitude meters"])
         trigger_points.append(
             TriggerPoint(
                 trigger_point_id=trigger_point_id,
                 name=trigger_point_id,
                 lat=lat,
                 lon=lon,
+                altitude_m=altitude_m,
                 radius_m=RADIUS_M,
                 climbs=[],
             )

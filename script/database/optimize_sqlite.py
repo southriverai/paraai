@@ -2,8 +2,8 @@
 
 Run once after ingestion. Indexes and WAL mode persist. Speeds up:
 - ORDER BY on timestamp fields (earliest/latest queries)
-- Bounding box queries on start_lat/start_lon (simple_climb)
-- Key prefix scans (e.g. tracklog_id_*)
+- Bounding box queries on lat/lon (simple_climb start+ground, simple_climb_pixel, trigger_point)
+- Name lookups (trigger_point)
 - General read throughput
 
 Usage:
@@ -13,11 +13,16 @@ Usage:
 import sqlite3
 from pathlib import Path
 
-# Collections that have timestamp fields worth indexing (others get PRAGMAs only)
-INDEX_START_TS = {"simple_climb"}  # has start_timestamp_utc
-INDEX_LIST_TS_0 = {"climb"}  # has list_timestamp_utc[0]
-# Collections with lat/lon for bounding box queries
-INDEX_START_LAT_LON = {"simple_climb"}  # has start_lat, start_lon
+# Collections with timestamp fields for ORDER BY / earliest-latest
+INDEX_START_TS = {"simple_climb"}
+INDEX_LIST_TS_0 = {"climb"}  # list_timestamp_utc[0]
+
+# Collections with lat/lon for bounding box queries (field names -> collections)
+INDEX_LAT_LON: dict[tuple[str, str], set[str]] = {
+    ("start_lat", "start_lon"): {"simple_climb"},  # get_all_in_bounding_box
+    ("ground_lat", "ground_lon"): {"simple_climb"},  # get_all_in_bounding_box_by_ground
+    ("lat", "lon"): {"simple_climb_pixel", "trigger_point"},
+}
 
 
 def optimize_db(path_db: Path) -> None:
@@ -72,18 +77,35 @@ def optimize_db(path_db: Path) -> None:
                 else:
                     raise
 
-        if collection in INDEX_START_LAT_LON:
+        for (lat_key, lon_key), collections in INDEX_LAT_LON.items():
+            if collection in collections:
+                idx_name = f"idx_{lat_key}_{lon_key}".replace(".", "_")
+                try:
+                    conn.execute(
+                        f"""
+                        CREATE INDEX IF NOT EXISTS {idx_name}
+                        ON store (json_extract(document, '$.{lat_key}'), json_extract(document, '$.{lon_key}'))
+                        """
+                    )
+                    print(f"  Created index {idx_name}")
+                except sqlite3.OperationalError as e:
+                    if "duplicate" in str(e).lower() or "already exists" in str(e).lower():
+                        print(f"  Index {idx_name} already exists")
+                    else:
+                        raise
+
+        if collection == "trigger_point":
             try:
                 conn.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS idx_start_lat_lon
-                    ON store (json_extract(document, '$.start_lat'), json_extract(document, '$.start_lon'))
+                    CREATE INDEX IF NOT EXISTS idx_name
+                    ON store (json_extract(document, '$.name'))
                     """
                 )
-                print("  Created index idx_start_lat_lon")
+                print("  Created index idx_name")
             except sqlite3.OperationalError as e:
                 if "duplicate" in str(e).lower() or "already exists" in str(e).lower():
-                    print("  Index idx_start_lat_lon already exists")
+                    print("  Index idx_name already exists")
                 else:
                     raise
 
@@ -92,14 +114,21 @@ def optimize_db(path_db: Path) -> None:
 
 
 def main() -> None:
-    path_dir = Path("data", "database_sqlite") / "tracklogs"
-    if not path_dir.exists():
-        print(f"Directory not found: {path_dir}")
+    path_dir = Path("data", "database_sqlite")
+    db_files = sorted(path_dir.rglob("*.db"))
+    if not db_files:
+        if not path_dir.exists():
+            print(f"Directory not found: {path_dir}")
+        else:
+            print(f"No .db files in {path_dir}")
         return
-    for path_db in sorted(path_dir.glob("*.db")):
+    for path_db in db_files:
         optimize_db(path_db)
     print("Done.")
 
 
 if __name__ == "__main__":
     main()
+
+# Run:
+# poetry run python script/database/optimize_sqlite.py

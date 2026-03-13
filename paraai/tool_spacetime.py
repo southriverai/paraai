@@ -3,6 +3,39 @@
 import math
 from datetime import datetime
 
+import numpy as np
+
+# Europe bounds (lat min, lat max, lon min, lon max): ~Iberia to Nordkapp, Ireland to Urals
+EUROPE_BOUNDS: tuple[float, float, float, float] = (36.0, 72.0, -11.0, 42.0)
+
+
+# Alps bounds (lat min, lat max, lon min, lon max): ~Alps to Pyrenees
+ALPS_BOUNDS: tuple[float, float, float, float] = (45.0, 49.0, 5.0, 15.0)
+
+# Bassano del Grappa (Monte Grappa, Semonzo) ~50km bbox
+BASSANO_BOUNDS: tuple[float, float, float, float] = (45.5, 46.0, 11.4, 12.1)
+
+# Sopot, Bulgaria ~50km bbox
+SOPOT_BOUNDS: tuple[float, float, float, float] = (42.4, 42.9, 24.4, 25.1)
+
+# Bansko, Bulgaria ~50km bbox
+BANSKO_BOUNDS: tuple[float, float, float, float] = (41.5, 42.2, 23.2, 23.8)
+
+REGION_BOUNDS: dict[str, tuple[float, float, float, float]] = {
+    "europe": EUROPE_BOUNDS,
+    "bassano": BASSANO_BOUNDS,
+    "sopot": SOPOT_BOUNDS,
+    "bansko": BANSKO_BOUNDS,
+}
+
+
+def is_in_region(region_name: str, lat: float, lon: float) -> bool:
+    bounds = REGION_BOUNDS.get(region_name.lower())
+    if bounds is None:
+        return False
+    lat_min, lat_max, lon_min, lon_max = bounds
+    return lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
+
 
 def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     """Distance in meters between two lat/lng points (haversine formula)."""
@@ -22,6 +55,51 @@ def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 def haversine_km_tuple(lat_lon_pair_1: tuple[float, float], lat_lon_pair_2: tuple[float, float]) -> float:
     """Distance in km between two lat/lng points (haversine formula)."""
     return haversine_m(lat_lon_pair_1[0], lat_lon_pair_1[1], lat_lon_pair_2[0], lat_lon_pair_2[1]) / 1000
+
+
+# 1 arc-second ≈ 30.8 m at equator. Copernicus DEM resolution.
+METERS_PER_DEG_LAT = 111_000
+RESOLUTION_DEG = 1 / 3600
+
+
+def dem_pixel_size_m(lat: float) -> tuple[float, float]:
+    """Return (width_m, height_m) of a 1 arc-second DEM pixel at latitude.
+
+    Width (lon direction) shrinks with cos(lat); height (lat direction) is constant.
+    """
+    width_m = METERS_PER_DEG_LAT * RESOLUTION_DEG * math.cos(math.radians(lat))
+    height_m = METERS_PER_DEG_LAT * RESOLUTION_DEG
+    return width_m, height_m
+
+
+def build_gaussian_kernel_meters(
+    sigma_m: float,
+    lat: float,
+    lon: float,
+    *,
+    pixel_size_deg: float = RESOLUTION_DEG,
+) -> np.ndarray:
+    """Build 2D Gaussian convolution kernel with sigma in meters.
+
+    Accounts for pixel dimensions at (lat, lon): pixels are narrower in the
+    longitude direction at higher latitudes.
+
+    Returns:
+        Normalized kernel array (2D), odd size, sum=1.
+    """
+    width_m, height_m = dem_pixel_size_m(lat)
+    sigma_x_pixels = sigma_m / width_m
+    sigma_y_pixels = sigma_m / height_m
+    radius_x = int(math.ceil(3 * sigma_x_pixels))
+    radius_y = int(math.ceil(3 * sigma_y_pixels))
+    size_x = 2 * radius_x + 1
+    size_y = 2 * radius_y + 1
+    y = np.arange(size_y, dtype=np.float64) - radius_y
+    x = np.arange(size_x, dtype=np.float64) - radius_x
+    yy, xx = np.meshgrid(y, x, indexing="ij")
+    kernel = np.exp(-(xx**2 / (2 * sigma_x_pixels**2) + yy**2 / (2 * sigma_y_pixels**2)))
+    kernel /= kernel.sum()
+    return kernel
 
 
 def utc_to_solar_hour(dt: datetime, longitude_deg: float) -> float:
