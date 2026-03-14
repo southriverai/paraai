@@ -20,7 +20,9 @@ from paraai.map.map_estimate_net import MapEstimateNet
 from paraai.map.vectror_map_array import VectorMapArray
 from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_datasets import RepositoryDatasets
+from paraai.repository.repository_simple_climb import RepositorySimpleClimb
 from paraai.repository.repository_terrain import RepositoryTerrain
+from paraai.tools_datasets import split_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +211,8 @@ class MapBuilderEstimateNet(MapBuilderBase):
         df_test: pd.DataFrame,
         *,
         ignore_cache: bool = False,
+        test_frac: float | None = None,
+        split_seed: int | None = None,
     ) -> dict:
         """
         Build dataset from df_training and df_test (split is made by the caller).
@@ -222,13 +226,15 @@ class MapBuilderEstimateNet(MapBuilderBase):
             if "strength" not in df.columns:
                 raise ValueError(f"{name} must have column 'strength'")
 
+        cache_params = (
+            self.get_dataset_cache_params(test_frac, split_seed)
+            if test_frac is not None and split_seed is not None
+            else self.get_cache_params()
+        )
+
         if not ignore_cache:
             repo = RepositoryDatasets.get_instance()
-            data = repo.get_dataset(
-                self.name,
-                bounding_box,
-                **self.get_cache_params(),
-            )
+            data = repo.get_dataset(self.name, bounding_box, **cache_params)
             if data is not None:
                 n_train = len(data["input_maps_train"])
                 n_test = len(data["input_maps_test"])
@@ -270,13 +276,47 @@ class MapBuilderEstimateNet(MapBuilderBase):
         }
 
         repo = RepositoryDatasets.get_instance()
-        repo.save_dataset(data, self.name, bounding_box, **self.get_cache_params())
+        repo.save_dataset(data, self.name, bounding_box, **cache_params)
         logger.info(
             "Cached dataset (%s train, %s test patches) to repository",
             len(input_maps_train),
             len(input_maps_test),
         )
         return data
+
+    def get_dataset_cache_params(self, test_frac: float, split_seed: int) -> dict:
+        """Params for dataset cache key (includes split params)."""
+        return {
+            **self.get_cache_params(),
+            "test_frac": test_frac,
+            "split_seed": split_seed,
+        }
+
+    def get_or_build_dataset(
+        self,
+        bounding_box: BoundingBox,
+        test_frac: float = 0.2,
+        split_seed: int = 42,
+        *,
+        ignore_cache: bool = False,
+    ) -> dict:
+        """Load dataset from cache or build from region. Returns dataset dict."""
+        cache_params = self.get_dataset_cache_params(test_frac, split_seed)
+        if not ignore_cache:
+            repo = RepositoryDatasets.get_instance()
+            data = repo.get_dataset(self.name, bounding_box, **cache_params)
+            if data is not None:
+                n_train = len(data["input_maps_train"])
+                n_test = len(data["input_maps_test"])
+                logger.info("Loaded dataset from cache (%s train, %s test patches)", n_train, n_test)
+                return data
+
+        logger.info("Dataset not in cache, building from region")
+        climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
+        train_df, test_df = split_dataframe(climb_df, test_frac, split_seed)
+        return self.build_dataset(
+            bounding_box, train_df, test_df, ignore_cache=True, test_frac=test_frac, split_seed=split_seed
+        )
 
     def _train_model(
         self,

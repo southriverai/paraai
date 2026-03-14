@@ -7,11 +7,20 @@ import json
 import logging
 from pathlib import Path
 
+import pandas as pd
 import torch
 
 from paraai.model.boundingbox import BoundingBox
 
 logger = logging.getLogger(__name__)
+
+
+def split_dataframe(df: pd.DataFrame, test_frac: float, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split dataframe into train and test. Split is deterministic by seed."""
+    n_test = max(1, int(len(df) * test_frac))
+    n_train = len(df) - n_test
+    df_shuffled = df.sample(frac=1, random_state=seed).reset_index(drop=True)
+    return df_shuffled.iloc[:n_train], df_shuffled.iloc[n_train:]
 
 
 def _dataset_cache_hash(

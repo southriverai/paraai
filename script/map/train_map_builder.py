@@ -31,7 +31,6 @@ import argparse
 import logging
 
 import numpy as np
-import pandas as pd
 import rasterio
 import torch
 from torch import nn
@@ -43,6 +42,7 @@ from paraai.repository.repository_simple_climb import RepositorySimpleClimb
 from paraai.repository.repository_terrain import RepositoryTerrain
 from paraai.setup import setup
 from paraai.tool_spacetime import get_bounding_box
+from paraai.tools_datasets import split_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -75,15 +75,12 @@ class MapDataset(Dataset):
 def run_dataset_mode(args: argparse.Namespace) -> None:
     """Build dataset from region and save to RepositoryDatasets cache."""
     bounding_box = get_bounding_box(args.region)
-    climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
-    train_df, test_df = _split_dataframe(climb_df, args.test_frac, args.split_seed)
-
     builder = MapBuilderEstimateNet(
         patch_size_m=args.patch_size_m,
         image_size=args.image_size,
         grid_stride=args.grid_stride,
     )
-    data = builder.build_dataset(bounding_box, train_df, test_df)
+    data = builder.get_or_build_dataset(bounding_box, args.test_frac, args.split_seed, ignore_cache=True)
     n_train = len(data["input_maps_train"])
     n_test = len(data["input_maps_test"])
     logger.info("Dataset (%s train, %s test patches) built and cached in RepositoryDatasets", n_train, n_test)
@@ -91,36 +88,13 @@ def run_dataset_mode(args: argparse.Namespace) -> None:
 
 def run_train_mode(args: argparse.Namespace) -> None:
     """Load dataset from RepositoryDatasets (or build from region if missing), train model, save model."""
-    from paraai.repository.repository_datasets import RepositoryDatasets
-
     bounding_box = get_bounding_box(args.region)
     builder = MapBuilderEstimateNet(
         patch_size_m=args.patch_size_m,
         image_size=args.image_size,
         grid_stride=args.grid_stride,
     )
-    repo = RepositoryDatasets.get_instance()
-    data = repo.get_dataset(builder.name, bounding_box, **builder.get_cache_params())
-    if data is None:
-        logger.info("Dataset not in cache, building from region %s", args.region)
-        climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
-        train_df, test_df = _split_dataframe(climb_df, args.test_frac, args.split_seed)
-        data = builder.build_dataset(bounding_box, train_df, test_df)
-    elif "input_maps_train" not in data:
-        # Backward compat: old cache had input_maps, target_maps
-        n_test = max(1, int(len(data["input_maps"]) * args.test_frac))
-        n_train = len(data["input_maps"]) - n_test
-        gen = torch.Generator().manual_seed(args.split_seed)
-        perm = torch.randperm(len(data["input_maps"]), generator=gen).tolist()
-        train_idx = perm[:n_train]
-        test_idx = perm[n_train:]
-        data = {
-            "input_maps_train": [data["input_maps"][i] for i in train_idx],
-            "target_maps_train": [data["target_maps"][i] for i in train_idx],
-            "input_maps_test": [data["input_maps"][i] for i in test_idx],
-            "target_maps_test": [data["target_maps"][i] for i in test_idx],
-            "metadata": data["metadata"],
-        }
+    data = builder.get_or_build_dataset(bounding_box, args.test_frac, args.split_seed)
 
     input_maps_train = data["input_maps_train"]
     target_maps_train = data["target_maps_train"]
@@ -208,21 +182,13 @@ def run_show_patch_mode(args: argparse.Namespace) -> None:
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
 
-    from paraai.repository.repository_datasets import RepositoryDatasets
-
     bounding_box = get_bounding_box(args.region)
     builder = MapBuilderEstimateNet(
         patch_size_m=args.patch_size_m,
         image_size=args.image_size,
         grid_stride=args.grid_stride,
     )
-    repo = RepositoryDatasets.get_instance()
-    data = repo.get_dataset(builder.name, bounding_box, **builder.get_cache_params())
-    if data is None:
-        logger.info("Dataset not in cache, building from region %s", args.region)
-        climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
-        train_df, test_df = _split_dataframe(climb_df, args.test_frac, args.split_seed)
-        data = builder.build_dataset(bounding_box, train_df, test_df)
+    data = builder.get_or_build_dataset(bounding_box, args.test_frac, args.split_seed)
 
     input_maps_train = data["input_maps_train"]
     target_maps_train = data["target_maps_train"]
@@ -329,7 +295,7 @@ def run_eval_mode(args: argparse.Namespace) -> None:
         )
 
     climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
-    train_df, holdout_df = _split_dataframe(climb_df, args.test_frac, args.split_seed)
+    train_df, holdout_df = split_dataframe(climb_df, args.test_frac, args.split_seed)
     maps = builder.build(bounding_box, train_df, ignore_cache=True)
     vma = maps["strength"]
 
@@ -352,16 +318,6 @@ def run_eval_mode(args: argparse.Namespace) -> None:
         title=f"MapBuilderEstimateNet: {args.region}",
         elevation=elevation,
     )
-
-
-def _split_dataframe(df: pd.DataFrame, test_frac: float, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Split dataframe into train and test. Split is deterministic by seed."""
-    n_test = max(1, int(len(df) * test_frac))
-    n_train = len(df) - n_test
-    df_shuffled = df.sample(frac=1, random_state=seed).reset_index(drop=True)
-    train_df = df_shuffled.iloc[:n_train]
-    test_df = df_shuffled.iloc[n_train:]
-    return train_df, test_df
 
 
 def parse_args() -> argparse.Namespace:
