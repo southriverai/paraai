@@ -158,9 +158,9 @@ class RepositorySimpleClimb:
 
         return results
 
-    def get_climb_dataframe(self, bounding_box: BoundingBox) -> pd.DataFrame:
+    async def get_climb_dataframe(self, bounding_box: BoundingBox) -> pd.DataFrame:
         """Load climbs in bounding box as DataFrame with lat, lon, strength (ground points)."""
-        climbs = asyncio.run(self.get_all_in_bounding_box_by_ground(bounding_box))
+        climbs = await self.get_all_in_bounding_box_by_ground(bounding_box, verbose=True)
         if len(climbs) < 1:
             raise ValueError("No SimpleClimbs in region")
         return pd.DataFrame(

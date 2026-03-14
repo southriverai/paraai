@@ -28,6 +28,7 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 
 import numpy as np
@@ -36,8 +37,9 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset
 
-from paraai.map.map_builder_estimate_net import MapBuilderEstimateNet, _latlon_to_bbox
+from paraai.map.map_builder_estimate_net import MapBuilderEstimateNet
 from paraai.map.map_estimate_net import MapEstimateNet
+from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_simple_climb import RepositorySimpleClimb
 from paraai.repository.repository_terrain import RepositoryTerrain
 from paraai.setup import setup
@@ -172,6 +174,8 @@ def run_train_mode(args: argparse.Namespace) -> None:
         out_c,
         image_size,
         builder.name,
+        strength_lo=meta["strength_lo"],
+        strength_hi=meta["strength_hi"],
         **cache_params,
     )
     logger.info("Saved model to RepositoryModels")
@@ -221,7 +225,8 @@ def run_show_patch_mode(args: argparse.Namespace) -> None:
     colors = ["red", "blue"]
     for i, idx in enumerate(indices):
         lat, lon = lats_train[idx], lons_train[idx]
-        lon_min, lat_min, lon_max, lat_max = _latlon_to_bbox(lat, lon, patch_size_m)
+        bbox = BoundingBox.from_latlon_radius(lat, lon, patch_size_m)
+        lon_min, lat_min, lon_max, lat_max = bbox.lon_min, bbox.lat_min, bbox.lon_max, bbox.lat_max
         rect = mpatches.Rectangle(
             (lon_min, lat_min),
             lon_max - lon_min,
@@ -272,7 +277,7 @@ def run_estimate_mode(args: argparse.Namespace) -> None:
             f"Model not found in RepositoryModels for {builder.name}. Run train mode first."
         )
 
-    climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
+    climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
     builder.build(bounding_box, climb_df, ignore_cache=True)
     logger.info("Built and cached strength map")
 
@@ -294,7 +299,7 @@ def run_eval_mode(args: argparse.Namespace) -> None:
             f"Model not found in RepositoryModels for {builder.name}. Run train mode first."
         )
 
-    climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
+    climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
     train_df, holdout_df = split_dataframe(climb_df, args.test_frac, args.split_seed)
     maps = builder.build(bounding_box, train_df, ignore_cache=True)
     vma = maps["strength"]

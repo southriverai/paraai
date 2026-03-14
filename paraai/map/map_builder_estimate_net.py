@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
-import math
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -20,19 +19,12 @@ from paraai.map.map_estimate_net import MapEstimateNet
 from paraai.map.vectror_map_array import VectorMapArray
 from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_datasets import RepositoryDatasets
+from paraai.repository.repository_models import RepositoryModels
 from paraai.repository.repository_simple_climb import RepositorySimpleClimb
 from paraai.repository.repository_terrain import RepositoryTerrain
 from paraai.tools_datasets import split_dataframe
 
 logger = logging.getLogger(__name__)
-
-
-def _latlon_to_bbox(lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:
-    """Bounding box around (lat, lon) with radius_m in meters."""
-    radius_km = radius_m / 1000.0
-    deg_lat = radius_km / 111.0
-    deg_lon = radius_km / (111.0 * math.cos(math.radians(lat)))
-    return lon - deg_lon, lat - deg_lat, lon + deg_lon, lat + deg_lat
 
 
 def _extract_elevation_patch(
@@ -44,7 +36,8 @@ def _extract_elevation_patch(
     size: int,
 ) -> torch.Tensor:
     """Extract elevation patch centered on (lat, lon), resize to (1, size, size), normalize to [0,1]."""
-    lon_min, lat_min, lon_max, lat_max = _latlon_to_bbox(lat, lon, radius_m)
+    bbox = BoundingBox.from_latlon_radius(lat, lon, radius_m)
+    lon_min, lat_min, lon_max, lat_max = bbox.lon_min, bbox.lat_min, bbox.lon_max, bbox.lat_max
     from rasterio.windows import from_bounds
 
     win = from_bounds(lon_min, lat_min, lon_max, lat_max, transform)
@@ -104,7 +97,6 @@ class MapBuilderEstimateNet(MapBuilderBase):
         batch_size: int = 8,
         lr: float = 1e-3,
         return_model: str = "lowest_test",
-        model_path: Path | str | None = None,
     ) -> None:
         super().__init__(name="MapBuilderEstimateNet", output_map_names=["strength"])
         self.patch_size_m = patch_size_m
@@ -114,7 +106,6 @@ class MapBuilderEstimateNet(MapBuilderBase):
         self.batch_size = batch_size
         self.lr = lr
         self.return_model = return_model
-        self.model_path = Path(model_path) if model_path else None
 
     def get_cache_params(self) -> dict:
         return {
@@ -129,6 +120,14 @@ class MapBuilderEstimateNet(MapBuilderBase):
             "patch_size_m": self.patch_size_m,
             "image_size": self.image_size,
             "grid_stride": self.grid_stride,
+        }
+
+    def get_dataset_cache_params(self, test_frac: float, split_seed: int) -> dict:
+        """Params for dataset cache key (includes split params)."""
+        return {
+            **self.get_cache_params(),
+            "test_frac": test_frac,
+            "split_seed": split_seed,
         }
 
     def _build_dataset(
@@ -168,12 +167,13 @@ class MapBuilderEstimateNet(MapBuilderBase):
 
         def _build_patches(
             df: pd.DataFrame,
+            desc: str = "Building patches",
         ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[float], list[float]]:
             inputs: list[torch.Tensor] = []
             targets: list[torch.Tensor] = []
             lats: list[float] = []
             lons: list[float] = []
-            for _, row in df.iterrows():
+            for _, row in tqdm(df.iterrows(), total=len(df), desc=desc, unit="patch"):
                 lat_val = float(row["lat"])
                 lon_val = float(row["lon"])
                 raw_val = float(row["strength"])
@@ -186,8 +186,8 @@ class MapBuilderEstimateNet(MapBuilderBase):
                 lons.append(lon_val)
             return inputs, targets, lats, lons
 
-        input_maps_train, target_maps_train, lats_train, lons_train = _build_patches(df_training)
-        input_maps_test, target_maps_test, lats_test, lons_test = _build_patches(df_test)
+        input_maps_train, target_maps_train, lats_train, lons_train = _build_patches(df_training, desc="Train patches")
+        input_maps_test, target_maps_test, lats_test, lons_test = _build_patches(df_test, desc="Test patches")
 
         return (
             input_maps_train,
@@ -284,14 +284,6 @@ class MapBuilderEstimateNet(MapBuilderBase):
         )
         return data
 
-    def get_dataset_cache_params(self, test_frac: float, split_seed: int) -> dict:
-        """Params for dataset cache key (includes split params)."""
-        return {
-            **self.get_cache_params(),
-            "test_frac": test_frac,
-            "split_seed": split_seed,
-        }
-
     def get_or_build_dataset(
         self,
         bounding_box: BoundingBox,
@@ -312,11 +304,10 @@ class MapBuilderEstimateNet(MapBuilderBase):
                 return data
 
         logger.info("Dataset not in cache, building from region")
-        climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
+        climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
         train_df, test_df = split_dataframe(climb_df, test_frac, split_seed)
-        return self.build_dataset(
-            bounding_box, train_df, test_df, ignore_cache=True, test_frac=test_frac, split_seed=split_seed
-        )
+        logger.info("Split dataset into train/test (%s train, %s test)", len(train_df), len(test_df))
+        return self.build_dataset(bounding_box, train_df, test_df, ignore_cache=True, test_frac=test_frac, split_seed=split_seed)
 
     def _train_model(
         self,
@@ -326,11 +317,6 @@ class MapBuilderEstimateNet(MapBuilderBase):
         target_maps_test: list[torch.Tensor],
     ) -> MapEstimateNet:
         """Train CNN on pre-split train/test data. Returns best model."""
-        train_ds = _MapDataset(input_maps_train, target_maps_train)
-        test_ds = _MapDataset(input_maps_test, target_maps_test)
-        train_loader = torch.utils.data.DataLoader(train_ds, batch_size=self.batch_size, shuffle=True)
-        test_loader = torch.utils.data.DataLoader(test_ds, batch_size=self.batch_size, shuffle=False)
-
         in_c = input_maps_train[0].shape[0]
         out_c = target_maps_train[0].shape[0]
         model = MapEstimateNet(in_channels=in_c, out_channels=out_c, size=self.image_size)
@@ -340,55 +326,39 @@ class MapBuilderEstimateNet(MapBuilderBase):
         optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
         criterion = nn.MSELoss()
 
+        # Load all data to GPU once and keep there during training
+        train_inp = torch.stack(input_maps_train).to(device)
+        train_tgt = torch.stack(target_maps_train).to(device)
+        test_inp = torch.stack(input_maps_test).to(device)
+        test_tgt = torch.stack(target_maps_test).to(device)
+
         best_test_loss = float("inf")
         best_test_state: dict | None = None
 
-        chunk_size = 10
-        for chunk_start in range(0, self.epochs, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, self.epochs)
-            n_chunk = chunk_end - chunk_start
-            pbar = tqdm(range(n_chunk), desc=f"Epochs {chunk_start + 1}-{chunk_end}", unit="epoch")
-            for _epoch in pbar:
-                model.train()
-                train_loss = 0.0
-                n_train_batches = 0
-                for inp_batch, tgt_batch in train_loader:
-                    inp_dev = inp_batch.to(device)
-                    tgt_dev = tgt_batch.to(device)
-                    optimizer.zero_grad()
-                    pred = model(inp_dev)
-                    if pred.shape[2:] != tgt_dev.shape[2:]:
-                        pred = nn.functional.interpolate(pred, size=tgt_dev.shape[2:], mode="bilinear")
-                    loss = criterion(pred, tgt_dev)
-                    loss.backward()
-                    optimizer.step()
-                    train_loss += loss.item()
-                    n_train_batches += 1
-                train_loss /= n_train_batches if n_train_batches else 1
+        pbar = tqdm(range(self.epochs), desc="Training", unit="epoch")
+        for _epoch in pbar:
+            model.train()
+            optimizer.zero_grad()
+            pred = model(train_inp)
+            if pred.shape[2:] != train_tgt.shape[2:]:
+                pred = nn.functional.interpolate(pred, size=train_tgt.shape[2:], mode="bilinear")
+            loss = criterion(pred, train_tgt)
+            loss.backward()
+            optimizer.step()
+            train_loss = loss.item()
 
-                model.eval()
-                with torch.no_grad():
-                    test_loss = 0.0
-                    n_test_batches = 0
-                    for inp_batch, tgt_batch in test_loader:
-                        inp_dev = inp_batch.to(device)
-                        tgt_dev = tgt_batch.to(device)
-                        pred = model(inp_dev)
-                        if pred.shape[2:] != tgt_dev.shape[2:]:
-                            pred = nn.functional.interpolate(pred, size=tgt_dev.shape[2:], mode="bilinear")
-                        test_loss += criterion(pred, tgt_dev).item()
-                        n_test_batches += 1
-                    test_loss /= n_test_batches if n_test_batches else 1
+            model.eval()
+            with torch.no_grad():
+                pred = model(test_inp)
+                if pred.shape[2:] != test_tgt.shape[2:]:
+                    pred = nn.functional.interpolate(pred, size=test_tgt.shape[2:], mode="bilinear")
+                test_loss = criterion(pred, test_tgt).item()
 
-                if test_loss < best_test_loss:
-                    best_test_loss = test_loss
-                    best_test_state = copy.deepcopy(model.state_dict())
-                    if self.model_path:
-                        self.model_path.parent.mkdir(parents=True, exist_ok=True)
-                        torch.save(best_test_state, self.model_path)
-                        logger.info("Saved best model (test_loss=%.6f) to %s", best_test_loss, self.model_path)
+            if test_loss < best_test_loss:
+                best_test_loss = test_loss
+                best_test_state = copy.deepcopy(model.state_dict())
 
-                pbar.set_postfix(train_loss=f"{train_loss:.4f}", test_loss=f"{test_loss:.4f}")
+            pbar.set_postfix(train_loss=f"{train_loss:.4f}", test_loss=f"{test_loss:.4f}")
 
         if self.return_model == "lowest_test" and best_test_state is not None:
             model.load_state_dict(best_test_state)
@@ -435,7 +405,6 @@ class MapBuilderEstimateNet(MapBuilderBase):
         df: pd.DataFrame | None = None,
     ) -> dict[str, VectorMapArray]:
         """Build strength map by loading model from repository and running inference."""
-        from paraai.repository.repository_models import RepositoryModels
 
         repo_models = RepositoryModels.get_instance()
         model_data = repo_models.get_model(self.name, **self.get_model_cache_params())
@@ -447,17 +416,8 @@ class MapBuilderEstimateNet(MapBuilderBase):
         elevation = terrain["elevation"]
         transform = terrain["transform"]
 
-        # strength_lo, strength_hi for denormalization (from df if available)
-        if not df.empty and "strength" in df.columns:
-            strength_vals = df["strength"].to_numpy(dtype=np.float64)
-            valid = strength_vals[~np.isnan(strength_vals) & (strength_vals > 0)]
-            if valid.size > 0:
-                p2, p98 = np.percentile(valid, [2, 98])
-                strength_lo, strength_hi = float(p2), float(p98)
-            else:
-                strength_lo, strength_hi = 0.0, 1.0
-        else:
-            strength_lo, strength_hi = 0.0, 1.0
+        strength_lo = model_data.get("strength_lo", 0.0)
+        strength_hi = model_data.get("strength_hi", 1.0)
         if strength_hi <= strength_lo:
             strength_hi = strength_lo + 1e-6
 

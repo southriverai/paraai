@@ -1,3 +1,5 @@
+import math
+
 from pydantic import BaseModel
 
 
@@ -8,6 +10,19 @@ class BoundingBox(BaseModel):
     lat_max: float
     lon_min: float
     lon_max: float
+
+    @staticmethod
+    def from_latlon_radius(lat: float, lon: float, radius_m: float) -> "BoundingBox":
+        """Bounding box around (lat, lon) with radius_m in meters."""
+        radius_km = radius_m / 1000.0
+        deg_lat = radius_km / 111.0
+        deg_lon = radius_km / (111.0 * math.cos(math.radians(lat)))
+        return BoundingBox(
+            lat_min=lat - deg_lat,
+            lat_max=lat + deg_lat,
+            lon_min=lon - deg_lon,
+            lon_max=lon + deg_lon,
+        )
 
     def is_in(self, lat: float, lon: float) -> bool:
         return self.lat_min <= lat <= self.lat_max and self.lon_min <= lon <= self.lon_max

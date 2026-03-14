@@ -28,6 +28,9 @@ def save_model(
     out_channels: int,
     cache_dir: Path,
     builder_name: str,
+    *,
+    strength_lo: float = 0.0,
+    strength_hi: float = 1.0,
     **params: object,
 ) -> Path:
     """Save model to cache. Returns path to saved file. image_size must be in params for cache key."""
@@ -43,6 +46,8 @@ def save_model(
         "in_channels": in_channels,
         "out_channels": out_channels,
         "image_size": params["image_size"],
+        "strength_lo": strength_lo,
+        "strength_hi": strength_hi,
     }
     torch.save(data, path)
     logger.debug("Saved model to %s", path)

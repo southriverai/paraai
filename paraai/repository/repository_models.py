@@ -40,6 +40,9 @@ class RepositoryModels:
         out_channels: int,
         image_size: int,
         builder_name: str,
+        *,
+        strength_lo: float = 0.0,
+        strength_hi: float = 1.0,
         **params: object,
     ) -> Path:
         """Save model to cache. Returns path to saved file."""
@@ -51,5 +54,7 @@ class RepositoryModels:
             out_channels,
             self.cache_dir,
             builder_name,
+            strength_lo=strength_lo,
+            strength_hi=strength_hi,
             **params_for_hash,
         )

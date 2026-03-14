@@ -17,6 +17,7 @@ from torch import nn
 from torch.utils.data import Dataset
 
 from paraai.map.map_estimate_net import MapEstimateNet
+from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_trigger_point import RepositoryTriggerPoint
 from paraai.tool_spacetime import haversine_km_tuple
 from paraai.tools_terrain import load_terrain
@@ -62,14 +63,6 @@ class MapDataset(Dataset):
         return self.input_maps[idx], self.target_maps[idx]
 
 
-def _latlon_to_bbox(lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:
-    """Bounding box around (lat, lon) with radius_m in meters."""
-    radius_km = radius_m / 1000.0
-    deg_lat = radius_km / 111.0
-    deg_lon = radius_km / (111.0 * math.cos(math.radians(lat)))
-    return lon - deg_lon, lat - deg_lat, lon + deg_lon, lat + deg_lat
-
-
 def _extract_elevation_patch(
     elevation: np.ndarray,
     transform: rasterio.Affine,
@@ -79,7 +72,8 @@ def _extract_elevation_patch(
     size: int,
 ) -> torch.Tensor:
     """Extract elevation patch centered on (lat, lon), resize to (1, size, size), normalize to [0,1]."""
-    lon_min, lat_min, lon_max, lat_max = _latlon_to_bbox(lat, lon, radius_m)
+    bbox = BoundingBox.from_latlon_radius(lat, lon, radius_m)
+    lon_min, lat_min, lon_max, lat_max = bbox.lon_min, bbox.lat_min, bbox.lon_max, bbox.lat_max
     from rasterio.windows import from_bounds
 
     win = from_bounds(lon_min, lat_min, lon_max, lat_max, transform)
