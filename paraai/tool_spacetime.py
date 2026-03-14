@@ -31,6 +31,14 @@ REGION_BOUNDS: dict[str, BoundingBox] = {
 }
 
 
+def get_bounding_box(region: str) -> BoundingBox:
+    """Return BoundingBox for region. Raises ValueError if unknown."""
+    bbox = REGION_BOUNDS.get(region.lower())
+    if bbox is None:
+        raise ValueError(f"Unknown region '{region}'. Available: {list(REGION_BOUNDS)}")
+    return bbox
+
+
 def get_region_bounding_box(region_name: str) -> BoundingBoxRegion | None:
     return REGION_DICT.get(region_name.lower())
 

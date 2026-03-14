@@ -51,7 +51,7 @@ class MapBuilderBase:
     def build(
         self,
         bounding_box: BoundingBox,
-        df: pd.DataFrame,
+        df: pd.DataFrame | None = None,
         *,
         ignore_cache: bool = False,
     ) -> dict[str, VectorMapArray]:
@@ -88,7 +88,7 @@ class MapBuilderBase:
     def _build_impl(
         self,
         bounding_box: BoundingBox,
-        df: pd.DataFrame,
+        df: pd.DataFrame | None = None,
     ) -> dict[str, VectorMapArray]:
         """Build maps. Override in subclasses."""
         pass

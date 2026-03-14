@@ -1,30 +1,34 @@
 """Train a CNN to estimate MapBuilderConvolution(200) strength map from elevation patches.
 
-Three modes:
-  dataset  - Build (elevation patches, target maps) from region and save to disk.
-  train    - Load dataset from disk, train the CNN, save model.
-  estimate - Load trained model, run inference on region, produce strength map.
+Modes:
+  dataset    - Build (elevation patches, target maps) from region and save to RepositoryDatasets.
+  train      - Load dataset from RepositoryDatasets (by builder + region + params), train the CNN, save model.
+  estimate   - Load trained model, run inference on region, produce strength map (no evaluation).
+  eval       - Evaluate on holdout data, print MAE/RMSE, show chart (like eval_map_builder.py).
+  show_patch - Show two random elevation patches from the training set.
 
 Usage examples:
 
-  # 1. Build dataset for region (requires climb pixels and terrain)
-  python script/map/train_map_builder.py dataset --region sopot --dataset-path data/datasets/sopot.pt
+  # 1. Build dataset for region (saves to RepositoryDatasets cache)
+  python script/map/train_map_builder.py --mode dataset --region sopot
 
-  # 2. Train model on saved dataset
-  python script/map/train_map_builder.py train --dataset-path data/datasets/sopot.pt --model-path data/models/map_model.pt --epochs 10
+  # 2. Train model (loads dataset from RepositoryDatasets by builder + region + params)
+  python script/map/train_map_builder.py --mode train --region sopot --epochs 10
 
-  # 3. Estimate strength map for region using trained model
-  python script/map/train_map_builder.py estimate --region sopot --model-path data/models/map_model.pt --output data/maps/strength_sopot.tif
+  # 3. Estimate strength map (default mode, cached by MapBuilderBase)
+  python script/map/train_map_builder.py --region sopot
 
-  # Or run all-in-one: build dataset on the fly, train, visualize (omit --dataset-path)
-  python script/map/train_map_builder.py train --region sopot --epochs 5 --visualize
+  # 4. Evaluate on holdout data
+  python script/map/train_map_builder.py --mode eval --region sopot
+
+  # Show two random elevation patches from the training set
+  python script/map/train_map_builder.py --mode show_patch --region sopot
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -33,13 +37,12 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset
 
-from paraai.map.map_builder_estimate_net import MapBuilderEstimateNet, _extract_elevation_patch
+from paraai.map.map_builder_estimate_net import MapBuilderEstimateNet, _latlon_to_bbox
 from paraai.map.map_estimate_net import MapEstimateNet
-from paraai.model.boundingbox import BoundingBox
-from paraai.repository.repository_simple_climb_pixel import RepositorySimpleClimbPixel
+from paraai.repository.repository_simple_climb import RepositorySimpleClimb
 from paraai.repository.repository_terrain import RepositoryTerrain
 from paraai.setup import setup
-from paraai.tool_spacetime import REGION_BOUNDS
+from paraai.tool_spacetime import get_bounding_box
 
 logger = logging.getLogger(__name__)
 
@@ -70,71 +73,70 @@ class MapDataset(Dataset):
 
 
 def run_dataset_mode(args: argparse.Namespace) -> None:
-    """Build dataset from region and save to disk."""
-    bounding_box = _get_bounding_box(args.region)
-    climb_df = _load_climb_dataframe(bounding_box)
+    """Build dataset from region and save to RepositoryDatasets cache."""
+    bounding_box = get_bounding_box(args.region)
+    climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
+    train_df, test_df = _split_dataframe(climb_df, args.test_frac, args.split_seed)
 
     builder = MapBuilderEstimateNet(
-        kernel_size_m=args.kernel_size_m,
         patch_size_m=args.patch_size_m,
         image_size=args.image_size,
         grid_stride=args.grid_stride,
     )
-    data = builder.build_dataset(bounding_box, climb_df)
-
-    # Serialize for disk (bounding_box already in metadata as dict)
-    save_data = {
-        "input_maps": data["input_maps"],
-        "target_maps": data["target_maps"],
-        "metadata": data["metadata"],
-    }
-    path = Path(args.dataset_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(save_data, path)
-    logger.info("Saved dataset (%s patches) to %s", len(data["input_maps"]), path)
+    data = builder.build_dataset(bounding_box, train_df, test_df)
+    n_train = len(data["input_maps_train"])
+    n_test = len(data["input_maps_test"])
+    logger.info("Dataset (%s train, %s test patches) built and cached in RepositoryDatasets", n_train, n_test)
 
 
 def run_train_mode(args: argparse.Namespace) -> None:
-    """Load dataset from disk (or build from region if missing), train model, save model."""
-    path = Path(args.dataset_path)
-    if path.exists():
-        data = torch.load(path, weights_only=False)
-    else:
-        # Build dataset on the fly from region
-        logger.info("Dataset not found at %s, building from region %s", path, args.region)
-        bounding_box = _get_bounding_box(args.region)
-        climb_df = _load_climb_dataframe(bounding_box)
-        builder = MapBuilderEstimateNet(
-            kernel_size_m=args.kernel_size_m,
-            patch_size_m=args.patch_size_m,
-            image_size=args.image_size,
-            grid_stride=args.grid_stride,
-        )
-        data = builder.build_dataset(bounding_box, climb_df)
+    """Load dataset from RepositoryDatasets (or build from region if missing), train model, save model."""
+    from paraai.repository.repository_datasets import RepositoryDatasets
+
+    bounding_box = get_bounding_box(args.region)
+    builder = MapBuilderEstimateNet(
+        patch_size_m=args.patch_size_m,
+        image_size=args.image_size,
+        grid_stride=args.grid_stride,
+    )
+    repo = RepositoryDatasets.get_instance()
+    data = repo.get_dataset(builder.name, bounding_box, **builder.get_cache_params())
+    if data is None:
+        logger.info("Dataset not in cache, building from region %s", args.region)
+        climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
+        train_df, test_df = _split_dataframe(climb_df, args.test_frac, args.split_seed)
+        data = builder.build_dataset(bounding_box, train_df, test_df)
+    elif "input_maps_train" not in data:
+        # Backward compat: old cache had input_maps, target_maps
+        n_test = max(1, int(len(data["input_maps"]) * args.test_frac))
+        n_train = len(data["input_maps"]) - n_test
+        gen = torch.Generator().manual_seed(args.split_seed)
+        perm = torch.randperm(len(data["input_maps"]), generator=gen).tolist()
+        train_idx = perm[:n_train]
+        test_idx = perm[n_train:]
         data = {
-            "input_maps": data["input_maps"],
-            "target_maps": data["target_maps"],
+            "input_maps_train": [data["input_maps"][i] for i in train_idx],
+            "target_maps_train": [data["target_maps"][i] for i in train_idx],
+            "input_maps_test": [data["input_maps"][i] for i in test_idx],
+            "target_maps_test": [data["target_maps"][i] for i in test_idx],
             "metadata": data["metadata"],
         }
 
-    input_maps = data["input_maps"]
-    target_maps = data["target_maps"]
+    input_maps_train = data["input_maps_train"]
+    target_maps_train = data["target_maps_train"]
+    input_maps_test = data["input_maps_test"]
+    target_maps_test = data["target_maps_test"]
     meta = data["metadata"]
 
-    in_c = input_maps[0].shape[0]
-    out_c = target_maps[0].shape[0]
+    in_c = input_maps_train[0].shape[0]
+    out_c = target_maps_train[0].shape[0]
     image_size = meta["image_size"]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Training on %s", device)
 
-    dataset = MapDataset(input_maps, target_maps=target_maps)
-    n_total = len(dataset)
-    n_test = max(1, int(n_total * args.test_frac))
-    n_train = n_total - n_test
-    train_ds, test_ds = torch.utils.data.random_split(
-        dataset, [n_train, n_test], generator=torch.Generator().manual_seed(args.split_seed)
-    )
+    train_ds = MapDataset(input_maps_train, target_maps=target_maps_train)
+    test_ds = MapDataset(input_maps_test, target_maps=target_maps_test)
     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     test_loader = torch.utils.data.DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
 
@@ -186,238 +188,180 @@ def run_train_mode(args: argparse.Namespace) -> None:
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    model_path = Path(args.model_path)
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "in_channels": in_c,
-            "out_channels": out_c,
-            "image_size": image_size,
-        },
-        model_path,
-    )
-    logger.info("Saved model to %s", model_path)
+    from paraai.repository.repository_models import RepositoryModels
 
-    if args.visualize:
-        _visualize_after_train(
-            model, data, meta, device, list(test_ds.indices), args.pred_stride
+    repo_models = RepositoryModels.get_instance()
+    cache_params = {k: v for k, v in builder.get_model_cache_params().items() if k != "image_size"}
+    repo_models.save_model(
+        model.state_dict(),
+        in_c,
+        out_c,
+        image_size,
+        builder.name,
+        **cache_params,
+    )
+    logger.info("Saved model to RepositoryModels")
+
+
+def run_show_patch_mode(args: argparse.Namespace) -> None:
+    """Show elevation map with patch locations, and two random patches in separate charts."""
+    import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
+
+    from paraai.repository.repository_datasets import RepositoryDatasets
+
+    bounding_box = get_bounding_box(args.region)
+    builder = MapBuilderEstimateNet(
+        patch_size_m=args.patch_size_m,
+        image_size=args.image_size,
+        grid_stride=args.grid_stride,
+    )
+    repo = RepositoryDatasets.get_instance()
+    data = repo.get_dataset(builder.name, bounding_box, **builder.get_cache_params())
+    if data is None:
+        logger.info("Dataset not in cache, building from region %s", args.region)
+        climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
+        train_df, test_df = _split_dataframe(climb_df, args.test_frac, args.split_seed)
+        data = builder.build_dataset(bounding_box, train_df, test_df)
+
+    input_maps_train = data["input_maps_train"]
+    target_maps_train = data["target_maps_train"]
+    lats_train = data["lats_train"]
+    lons_train = data["lons_train"]
+    meta = data["metadata"]
+    patch_size_m = meta["patch_size_m"]
+
+    n = len(input_maps_train)
+    if n < 2:
+        raise ValueError(f"Need at least 2 training patches, got {n}")
+
+    rng = np.random.default_rng(args.split_seed)
+    indices = rng.choice(n, size=2, replace=False)
+
+    # Load elevation for the full map
+    repo_terrain = RepositoryTerrain.get_instance()
+    terrain = repo_terrain.get_elevation(bounding_box)
+    elevation = terrain["elevation"]
+    transform = terrain["transform"]
+    bounds = rasterio.transform.array_bounds(elevation.shape[0], elevation.shape[1], transform)
+    extent = [bounds[0], bounds[2], bounds[1], bounds[3]]  # left, right, bottom, top
+
+    fig = plt.figure(figsize=(12, 6))
+    gs = fig.add_gridspec(2, 2, width_ratios=[1, 1], height_ratios=[1, 1], wspace=0.3, hspace=0.3)
+
+    # Left: full elevation map with dotted patch outlines
+    ax_map = fig.add_subplot(gs[:, 0])
+    ax_map.imshow(elevation, extent=extent, cmap="terrain", aspect="auto")
+    colors = ["red", "blue"]
+    for i, idx in enumerate(indices):
+        lat, lon = lats_train[idx], lons_train[idx]
+        lon_min, lat_min, lon_max, lat_max = _latlon_to_bbox(lat, lon, patch_size_m)
+        rect = mpatches.Rectangle(
+            (lon_min, lat_min),
+            lon_max - lon_min,
+            lat_max - lat_min,
+            linewidth=2,
+            edgecolor=colors[i],
+            facecolor="none",
+            linestyle=":",
         )
+        ax_map.add_patch(rect)
+        ax_map.plot(lon, lat, "o", color=colors[i], markersize=4)
+    ax_map.set_xlim(extent[0], extent[1])
+    ax_map.set_ylim(extent[2], extent[3])
+    ax_map.set_title("Elevation map (patch locations)")
+    ax_map.set_xlabel("Longitude")
+    ax_map.set_ylabel("Latitude")
+    ax_map.set_aspect("equal")
+
+    # Right: two patches in separate charts
+    for i, idx in enumerate(indices):
+        ax = fig.add_subplot(gs[i, 1])
+        patch = input_maps_train[idx]  # (1, H, W)
+        target = target_maps_train[idx]
+        strength_val = target[0, 0, 0].item()
+        img = patch[0].numpy()
+        ax.imshow(img, cmap="terrain", vmin=0, vmax=1)
+        ax.set_title(f"Patch {idx + 1} (strength={strength_val:.3f})")
+        ax.axis("off")
+    plt.suptitle("Two random elevation patches from training set")
+    plt.tight_layout()
+    plt.show()
 
 
 def run_estimate_mode(args: argparse.Namespace) -> None:
-    """Load trained model, run inference on region, save strength map."""
-    model_path = Path(args.model_path)
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model not found: {model_path}. Run train mode first.")
+    """Load trained model from RepositoryModels, run inference on region, cache strength map."""
+    from paraai.repository.repository_models import RepositoryModels
 
-    checkpoint = torch.load(model_path, weights_only=False)
-    state_dict = checkpoint["state_dict"]
-    in_c = checkpoint["in_channels"]
-    out_c = checkpoint["out_channels"]
-    image_size = checkpoint["image_size"]
-
-    model = MapEstimateNet(in_channels=in_c, out_channels=out_c, size=image_size)
-    model.load_state_dict(state_dict)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    model.eval()
-
-    bounding_box = _get_bounding_box(args.region)
-    patch_size_m = args.patch_size_m
-    grid_stride = args.grid_stride
-
-    repo_terrain = RepositoryTerrain.get_instance()
-    terrain = repo_terrain.get_elevation(bounding_box)
-    elevation = terrain["elevation"]
-    transform = terrain["transform"]
-    h, w = elevation.shape
-
-    n_rows = (h + grid_stride - 1) // grid_stride
-    n_cols = (w + grid_stride - 1) // grid_stride
-    pred_sparse = np.zeros((n_rows, n_cols), dtype=np.float32)
-
-    with torch.no_grad():
-        for ri, r in enumerate(range(0, h, grid_stride)):
-            for ci, c in enumerate(range(0, w, grid_stride)):
-                lon, lat = rasterio.transform.xy(transform, r, c)
-                patch = _extract_elevation_patch(
-                    elevation, transform, float(lat), float(lon), patch_size_m, image_size
-                )
-                patch_batch = patch.unsqueeze(0).to(device)
-                pred = model(patch_batch)
-                pred_sparse[ri, ci] = pred[0, 0, image_size // 2, image_size // 2].item()
-
-    pred_arr = pred_sparse
-    pred_grid = (
-        torch.from_numpy(pred_arr)
-        .unsqueeze(0)
-        .unsqueeze(0)
+    bounding_box = get_bounding_box(args.region)
+    builder = MapBuilderEstimateNet(
+        patch_size_m=args.patch_size_m,
+        image_size=args.image_size,
+        grid_stride=args.grid_stride,
     )
-    pred_grid = nn.functional.interpolate(
-        pred_grid, size=(h, w), mode="bilinear", align_corners=False
-    ).squeeze().numpy().astype(np.float32)
-    pred_grid = np.clip(pred_grid, 0, 1)
-
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    profile = {
-        "driver": "GTiff",
-        "width": w,
-        "height": h,
-        "count": 1,
-        "dtype": pred_grid.dtype,
-        "transform": transform,
-        "crs": rasterio.CRS.from_epsg(4326),
-    }
-    with rasterio.open(output_path, "w", **profile) as dst:
-        dst.write(pred_grid, 1)
-    logger.info("Saved strength map to %s", output_path)
-
-
-def _get_bounding_box(region: str) -> BoundingBox:
-    bbox = REGION_BOUNDS.get(region.lower())
-    if bbox is None:
-        raise ValueError(f"Unknown region '{region}'. Available: {list(REGION_BOUNDS)}")
-    return bbox
-
-
-def _load_climb_dataframe(bounding_box: BoundingBox) -> pd.DataFrame:
-    repo = RepositorySimpleClimbPixel.get_instance()
-    pixels = repo.get_all_in_bounding_box(
-        bounding_box.lat_min, bounding_box.lat_max, bounding_box.lon_min, bounding_box.lon_max
-    )
-    if len(pixels) < 1:
-        raise ValueError("No SimpleClimbPixels in region")
-    return pd.DataFrame(
-        [(p.lat, p.lon, p.climb_count, p.mean_climb_strength_m_s) for p in pixels],
-        columns=["lat", "lon", "count", "strength"],
-    )
-
-
-def _visualize_after_train(
-    model: MapEstimateNet,
-    data: dict,
-    meta: dict,
-    device: torch.device,
-    test_indices: list[int],
-    pred_stride: int,
-) -> None:
-    """Visualize after training (requires elevation - re-fetch from terrain)."""
-    bounding_box = BoundingBox(**meta["bounding_box"])
-    repo_terrain = RepositoryTerrain.get_instance()
-    terrain = repo_terrain.get_elevation(bounding_box)
-    elevation = terrain["elevation"]
-    transform = terrain["transform"]
-    image_size = meta["image_size"]
-    patch_size_m = meta["patch_size_m"]
-    strength_lo = meta["strength_lo"]
-    strength_hi = meta["strength_hi"]
-
-    # Build true_grid from target_maps (average at each cell - we have one value per patch)
-    # For viz we need a full grid. Rebuild from convolution target.
-    from paraai.map.map_builder_convolution import MapBuilderConvolution
-
-    climb_df = _load_climb_dataframe(bounding_box)
-    conv_builder = MapBuilderConvolution(kernel_size_m=meta["kernel_size_m"])
-    conv_maps = conv_builder.build(bounding_box, climb_df)
-    strength_arr = conv_maps["strength"].array
-    true_grid = np.clip(
-        (strength_arr.astype(np.float64) - strength_lo) / (strength_hi - strength_lo + 1e-10),
-        0,
-        1,
-    ).astype(np.float32)
-
-    h, w = elevation.shape
-    extent = [bounding_box.lon_min, bounding_box.lon_max, bounding_box.lat_min, bounding_box.lat_max]
-
-    model.eval()
-    stride = pred_stride
-    n_rows = (h + stride - 1) // stride
-    n_cols = (w + stride - 1) // stride
-    pred_sparse = np.zeros((n_rows, n_cols), dtype=np.float32)
-    with torch.no_grad():
-        for ri, r in enumerate(range(0, h, stride)):
-            for ci, c in enumerate(range(0, w, stride)):
-                lon, lat = rasterio.transform.xy(transform, r, c)
-                patch = _extract_elevation_patch(
-                    elevation, transform, float(lat), float(lon), patch_size_m, image_size
-                )
-                pred = model(patch.unsqueeze(0).to(device))
-                pred_sparse[ri, ci] = pred[0, 0, image_size // 2, image_size // 2].item()
-
-    pred_grid = (
-        nn.functional.interpolate(
-            torch.from_numpy(pred_sparse).unsqueeze(0).unsqueeze(0),
-            size=(h, w),
-            mode="bilinear",
-            align_corners=False,
+    repo_models = RepositoryModels.get_instance()
+    model_data = repo_models.get_model(builder.name, **builder.get_model_cache_params())
+    if model_data is None:
+        raise FileNotFoundError(
+            f"Model not found in RepositoryModels for {builder.name}. Run train mode first."
         )
-        .squeeze()
-        .numpy()
-        .astype(np.float32)
+
+    climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
+    builder.build(bounding_box, climb_df, ignore_cache=True)
+    logger.info("Built and cached strength map")
+
+
+def run_eval_mode(args: argparse.Namespace) -> None:
+    """Evaluate MapBuilderEstimateNet on holdout data (like eval_map_builder.py)."""
+    from paraai.repository.repository_models import RepositoryModels
+
+    bounding_box = get_bounding_box(args.region)
+    builder = MapBuilderEstimateNet(
+        patch_size_m=args.patch_size_m,
+        image_size=args.image_size,
+        grid_stride=args.grid_stride,
     )
-    pred_grid = np.clip(pred_grid, 0, 1)
+    repo_models = RepositoryModels.get_instance()
+    model_data = repo_models.get_model(builder.name, **builder.get_model_cache_params())
+    if model_data is None:
+        raise FileNotFoundError(
+            f"Model not found in RepositoryModels for {builder.name}. Run train mode first."
+        )
 
-    input_maps = data["input_maps"]
-    target_maps = data["target_maps"]
+    climb_df = RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box)
+    train_df, holdout_df = _split_dataframe(climb_df, args.test_frac, args.split_seed)
+    maps = builder.build(bounding_box, train_df, ignore_cache=True)
+    vma = maps["strength"]
 
-    import matplotlib.pyplot as plt
-    from matplotlib.gridspec import GridSpec
+    eval_result = builder.evaluate(vma, holdout_df, column_name="strength", n_train=len(train_df))
+    print("\n" + "=" * 60)
+    print(f"Map evaluation (n_train={len(train_df)}, n_holdout={len(holdout_df)})")
+    print("=" * 60)
+    print(f"strength_mae={eval_result.strength_mae:.4f} m/s, strength_rmse={eval_result.strength_rmse:.4f} m/s")
+    print("=" * 60 + "\n")
 
-    fig = plt.figure(figsize=(14, 10))
-    gs = GridSpec(2, 2, figure=fig, height_ratios=[1, 1], width_ratios=[1, 2])
-    ax_hist = fig.add_subplot(gs[0, 0])
-    ax_elev = fig.add_subplot(gs[0, 1])
-    ax_true = fig.add_subplot(gs[1, 0])
-    ax_pred = fig.add_subplot(gs[1, 1])
+    from paraai.map.show_climb_map import show_map_eval
 
-    preds_test = []
-    targets_test = []
-    for idx in test_indices:
-        inp = input_maps[idx].unsqueeze(0).to(device)
-        tgt = target_maps[idx]
-        pred = model(inp)
-        preds_test.append(pred[0, 0, image_size // 2, image_size // 2].item())
-        targets_test.append(tgt[0, image_size // 2, image_size // 2].item())
-
-    bins = np.linspace(0, 1, 21)
-    if preds_test:
-        ax_hist.hist(preds_test, bins=bins, alpha=0.7, color="blue", label="Predicted", density=True)
-    if targets_test:
-        ax_hist.hist(targets_test, bins=bins, alpha=0.5, color="green", label="Target", density=True)
-    ax_hist.set_xlabel("Strength (normalized)")
-    ax_hist.set_ylabel("Density")
-    ax_hist.set_title("Test set: predicted vs target")
-    ax_hist.legend()
-    ax_hist.set_xlim(0, 1)
-
-    elev_display = np.clip(
-        (elevation - np.nanpercentile(elevation, 2))
-        / (np.nanpercentile(elevation, 98) - np.nanpercentile(elevation, 2) + 1e-10),
-        0,
-        1,
+    terrain = RepositoryTerrain.get_instance().get_elevation(bounding_box)
+    elevation = terrain["elevation"].astype(np.float32)
+    elevation = np.nan_to_num(elevation, nan=0.0)
+    show_map_eval(
+        vma,
+        holdout_df,
+        column_name="strength",
+        title=f"MapBuilderEstimateNet: {args.region}",
+        elevation=elevation,
     )
-    ax_elev.imshow(elev_display, extent=extent, origin="upper", cmap="terrain")
-    ax_elev.set_title("Heightmap")
-    ax_elev.set_xlabel("Longitude")
-    ax_elev.set_ylabel("Latitude")
-    ax_elev.set_aspect("equal")
 
-    ax_true.imshow(true_grid, extent=extent, origin="upper", cmap="viridis", vmin=0, vmax=1)
-    ax_true.set_title("True: MapBuilderConvolution")
-    ax_true.set_xlabel("Longitude")
-    ax_true.set_ylabel("Latitude")
-    ax_true.set_aspect("equal")
 
-    ax_pred.imshow(pred_grid, extent=extent, origin="upper", cmap="viridis", vmin=0, vmax=1)
-    ax_pred.set_title("Predicted strength map")
-    ax_pred.set_xlabel("Longitude")
-    ax_pred.set_ylabel("Latitude")
-    ax_pred.set_aspect("equal")
-
-    plt.tight_layout()
-    plt.show()
+def _split_dataframe(df: pd.DataFrame, test_frac: float, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split dataframe into train and test. Split is deterministic by seed."""
+    n_test = max(1, int(len(df) * test_frac))
+    n_train = len(df) - n_test
+    df_shuffled = df.sample(frac=1, random_state=seed).reset_index(drop=True)
+    train_df = df_shuffled.iloc[:n_train]
+    test_df = df_shuffled.iloc[n_train:]
+    return train_df, test_df
 
 
 def parse_args() -> argparse.Namespace:
@@ -427,41 +371,43 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "mode",
-        choices=["dataset", "train", "estimate"],
-        help="dataset: build and save dataset; train: load dataset, train, save model; estimate: load model, produce map",
+        "--mode",
+        choices=["dataset", "train", "estimate", "eval", "show_patch"],
+        default="estimate",
+        help="dataset: build and save dataset; train: load dataset, train, save model; estimate: load model, produce map (default); eval: evaluate on holdout, show chart; show_patch: show two random patches from training set",
     )
     parser.add_argument("--region", type=str, default="sopot", help="Region (bassano, sopot, bansko, europe)")
-    parser.add_argument("--dataset-path", type=str, default="data/datasets/map_dataset.pt", help="Path for dataset file")
-    parser.add_argument("--model-path", type=str, default="data/models/map_model.pt", help="Path for model file")
-    parser.add_argument("--output", type=str, default="data/maps/strength.tif", help="Output GeoTIFF for estimate mode")
     parser.add_argument("--patch-size-m", type=float, default=500.0, help="Patch size in meters")
     parser.add_argument("--image-size", type=int, default=64, help="Patch resolution")
     parser.add_argument("--grid-stride", type=int, default=16, help="Stride for sampling grid")
-    parser.add_argument("--kernel-size-m", type=float, default=200.0, help="MapBuilderConvolution kernel")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--test-frac", type=float, default=0.2, help="Fraction for test set")
     parser.add_argument("--split-seed", type=int, default=42)
-    parser.add_argument("--pred-stride", type=int, default=16, help="Stride for prediction grid in viz")
-    parser.add_argument("--visualize", action="store_true", help="Show plot after train (requires dataset from same region)")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO")
     return parser.parse_args()
 
 
-def main() -> None:
+if __name__ == "__main__":
+    # Usage (dataset path derived from MapBuilderEstimateNet + region via RepositoryDatasets):
+    #   python script/map/train_map_builder.py --region sopot --mode show_patch
+    #   python script/map/train_map_builder.py --region sopot --mode dataset
+    #   python script/map/train_map_builder.py --region sopot --mode train --epochs 10
+    #   python script/map/train_map_builder.py --region sopot --mode estimate
+    #   python script/map/train_map_builder.py --region sopot --mode eval
+    #   python script/map/train_map_builder.py --region sopot  # default: --mode estimate
     args = parse_args()
-    logging.basicConfig(level=getattr(logging, args.log_level))
-
-    if args.mode == "dataset":
+    setup()
+    if args.mode == "show_patch":
+        run_show_patch_mode(args)
+    elif args.mode == "dataset":
         run_dataset_mode(args)
     elif args.mode == "train":
         run_train_mode(args)
-    else:
+    elif args.mode == "estimate":
         run_estimate_mode(args)
-
-
-if __name__ == "__main__":
-    setup()
-    main()
+    elif args.mode == "eval":
+        run_eval_mode(args)
+    else:
+        raise ValueError(f"Unknown mode: {args.mode}")

@@ -16,10 +16,10 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from paraai.map.map_builder_base import MapBuilderBase
-from paraai.map.map_builder_convolution import MapBuilderConvolution
 from paraai.map.map_estimate_net import MapEstimateNet
 from paraai.map.vectror_map_array import VectorMapArray
 from paraai.model.boundingbox import BoundingBox
+from paraai.repository.repository_datasets import RepositoryDatasets
 from paraai.repository.repository_terrain import RepositoryTerrain
 
 logger = logging.getLogger(__name__)
@@ -89,12 +89,11 @@ class MapBuilderEstimateNet(MapBuilderBase):
     """
     Map builder that trains a CNN to estimate strength from elevation patches.
 
-    Uses MapBuilderConvolution as target. Takes a DataFrame with lat, lon, count, strength.
+    Uses strength from the DataFrame at each point as target. Takes a DataFrame with lat, lon, strength.
     """
 
     def __init__(
         self,
-        kernel_size_m: float = 200.0,
         patch_size_m: float = 500.0,
         image_size: int = 64,
         grid_stride: int = 16,
@@ -102,32 +101,29 @@ class MapBuilderEstimateNet(MapBuilderBase):
         epochs: int = 5,
         batch_size: int = 8,
         lr: float = 1e-3,
-        test_frac: float = 0.2,
-        split_seed: int = 42,
         return_model: str = "lowest_test",
         model_path: Path | str | None = None,
     ) -> None:
         super().__init__(name="MapBuilderEstimateNet", output_map_names=["strength"])
-        self.kernel_size_m = kernel_size_m
         self.patch_size_m = patch_size_m
         self.image_size = image_size
         self.grid_stride = grid_stride
         self.epochs = epochs
         self.batch_size = batch_size
         self.lr = lr
-        self.test_frac = test_frac
-        self.split_seed = split_seed
         self.return_model = return_model
         self.model_path = Path(model_path) if model_path else None
-        self._last_model: MapEstimateNet | None = None
-        self._last_input_maps: list[torch.Tensor] | None = None
-        self._last_target_maps: list[torch.Tensor] | None = None
-        self._last_test_indices: list[int] | None = None
-        self._last_viz_data: dict | None = None
 
     def get_cache_params(self) -> dict:
         return {
-            "kernel_size_m": self.kernel_size_m,
+            "patch_size_m": self.patch_size_m,
+            "image_size": self.image_size,
+            "grid_stride": self.grid_stride,
+        }
+
+    def get_model_cache_params(self) -> dict:
+        """Params for model cache key (excludes split params)."""
+        return {
             "patch_size_m": self.patch_size_m,
             "image_size": self.image_size,
             "grid_stride": self.grid_stride,
@@ -136,21 +132,30 @@ class MapBuilderEstimateNet(MapBuilderBase):
     def _build_dataset(
         self,
         bounding_box: BoundingBox,
-        df: pd.DataFrame,
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor], np.ndarray, rasterio.Affine, float, float, np.ndarray]:
-        """Build (input_maps, target_maps) from df. Returns also elevation, transform, strength_lo, strength_hi, strength_arr."""
-        target_builder = MapBuilderConvolution(kernel_size_m=self.kernel_size_m)
-        maps = target_builder.build(bounding_box, df)
-        strength_vma = maps["strength"]
-
+        df_training: pd.DataFrame,
+        df_test: pd.DataFrame,
+    ) -> tuple[
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[float],
+        list[float],
+        list[float],
+        list[float],
+        np.ndarray,
+        rasterio.Affine,
+        float,
+        float,
+    ]:
+        """Build (input_maps_train, target_maps_train, input_maps_test, target_maps_test) from df_training and df_test."""
         repo_terrain = RepositoryTerrain.get_instance()
         terrain = repo_terrain.get_elevation(bounding_box)
         elevation = terrain["elevation"]
         transform = terrain["transform"]
-        h, w = elevation.shape
 
-        strength_arr = strength_vma.array
-        valid = strength_arr[strength_arr > 0]
+        strength_vals = df_training["strength"].to_numpy(dtype=np.float64)
+        valid = strength_vals[~np.isnan(strength_vals) & (strength_vals > 0)]
         if valid.size > 0:
             p2, p98 = np.percentile(valid, [2, 98])
             strength_lo, strength_hi = float(p2), float(p98)
@@ -159,70 +164,135 @@ class MapBuilderEstimateNet(MapBuilderBase):
         if strength_hi <= strength_lo:
             strength_hi = strength_lo + 1e-6
 
-        input_maps: list[torch.Tensor] = []
-        target_maps: list[torch.Tensor] = []
-
-        for r in range(0, h, self.grid_stride):
-            for c in range(0, w, self.grid_stride):
-                lon, lat = rasterio.transform.xy(transform, r, c)
-                lon_val, lat_val = float(lon), float(lat)
-                patch = _extract_elevation_patch(
-                    elevation, transform, lat_val, lon_val, self.patch_size_m, self.image_size
-                )
-                raw_val = strength_vma.get_value(lat_val, lon_val)
+        def _build_patches(
+            df: pd.DataFrame,
+        ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[float], list[float]]:
+            inputs: list[torch.Tensor] = []
+            targets: list[torch.Tensor] = []
+            lats: list[float] = []
+            lons: list[float] = []
+            for _, row in df.iterrows():
+                lat_val = float(row["lat"])
+                lon_val = float(row["lon"])
+                raw_val = float(row["strength"])
+                patch = _extract_elevation_patch(elevation, transform, lat_val, lon_val, self.patch_size_m, self.image_size)
                 norm_val = float(np.clip((raw_val - strength_lo) / (strength_hi - strength_lo), 0, 1))
                 target = torch.full((1, self.image_size, self.image_size), norm_val, dtype=torch.float32)
-                input_maps.append(patch)
-                target_maps.append(target)
+                inputs.append(patch)
+                targets.append(target)
+                lats.append(lat_val)
+                lons.append(lon_val)
+            return inputs, targets, lats, lons
 
-        return input_maps, target_maps, elevation, transform, strength_lo, strength_hi, strength_arr.copy()
+        input_maps_train, target_maps_train, lats_train, lons_train = _build_patches(df_training)
+        input_maps_test, target_maps_test, lats_test, lons_test = _build_patches(df_test)
+
+        return (
+            input_maps_train,
+            target_maps_train,
+            input_maps_test,
+            target_maps_test,
+            lats_train,
+            lons_train,
+            lats_test,
+            lons_test,
+            elevation,
+            transform,
+            strength_lo,
+            strength_hi,
+        )
 
     def build_dataset(
         self,
         bounding_box: BoundingBox,
-        df: pd.DataFrame,
+        df_training: pd.DataFrame,
+        df_test: pd.DataFrame,
+        *,
+        ignore_cache: bool = False,
     ) -> dict:
         """
-        Build dataset (input_maps, target_maps) from df for training.
+        Build dataset from df_training and df_test (split is made by the caller).
 
-        Returns dict with: input_maps, target_maps, metadata (strength_lo, strength_hi,
-        image_size, patch_size_m, grid_stride, kernel_size_m, bounding_box).
+        Returns dict with: input_maps_train, target_maps_train, input_maps_test, target_maps_test,
+        metadata (strength_lo, strength_hi, image_size, patch_size_m, grid_stride, bounding_box).
         """
-        input_maps, target_maps, elevation, transform, strength_lo, strength_hi, strength_arr = (
-            self._build_dataset(bounding_box, df)
-        )
-        return {
-            "input_maps": input_maps,
-            "target_maps": target_maps,
+        for df, name in [(df_training, "df_training"), (df_test, "df_test")]:
+            if "lat" not in df.columns or "lon" not in df.columns:
+                raise ValueError(f"{name} must have columns 'lat' and 'lon'")
+            if "strength" not in df.columns:
+                raise ValueError(f"{name} must have column 'strength'")
+
+        if not ignore_cache:
+            repo = RepositoryDatasets.get_instance()
+            data = repo.get_dataset(
+                self.name,
+                bounding_box,
+                **self.get_cache_params(),
+            )
+            if data is not None:
+                n_train = len(data["input_maps_train"])
+                n_test = len(data["input_maps_test"])
+                logger.info("Loaded dataset from cache (%s train, %s test patches)", n_train, n_test)
+                return data
+
+        (
+            input_maps_train,
+            target_maps_train,
+            input_maps_test,
+            target_maps_test,
+            lats_train,
+            lons_train,
+            lats_test,
+            lons_test,
+            elevation,
+            transform,
+            strength_lo,
+            strength_hi,
+        ) = self._build_dataset(bounding_box, df_training, df_test)
+
+        data = {
+            "input_maps_train": input_maps_train,
+            "target_maps_train": target_maps_train,
+            "input_maps_test": input_maps_test,
+            "target_maps_test": target_maps_test,
+            "lats_train": lats_train,
+            "lons_train": lons_train,
+            "lats_test": lats_test,
+            "lons_test": lons_test,
             "metadata": {
                 "strength_lo": strength_lo,
                 "strength_hi": strength_hi,
                 "image_size": self.image_size,
                 "patch_size_m": self.patch_size_m,
                 "grid_stride": self.grid_stride,
-                "kernel_size_m": self.kernel_size_m,
                 "bounding_box": bounding_box.model_dump(),
             },
         }
 
+        repo = RepositoryDatasets.get_instance()
+        repo.save_dataset(data, self.name, bounding_box, **self.get_cache_params())
+        logger.info(
+            "Cached dataset (%s train, %s test patches) to repository",
+            len(input_maps_train),
+            len(input_maps_test),
+        )
+        return data
+
     def _train_model(
         self,
-        input_maps: list[torch.Tensor],
-        target_maps: list[torch.Tensor],
-    ) -> tuple[MapEstimateNet, list[int]]:
-        """Train CNN and return (best model, test_indices)."""
-        dataset = _MapDataset(input_maps, target_maps)
-        n_total = len(dataset)
-        n_test = max(1, int(n_total * self.test_frac))
-        n_train = n_total - n_test
-        train_ds, test_ds = torch.utils.data.random_split(
-            dataset, [n_train, n_test], generator=torch.Generator().manual_seed(self.split_seed)
-        )
+        input_maps_train: list[torch.Tensor],
+        target_maps_train: list[torch.Tensor],
+        input_maps_test: list[torch.Tensor],
+        target_maps_test: list[torch.Tensor],
+    ) -> MapEstimateNet:
+        """Train CNN on pre-split train/test data. Returns best model."""
+        train_ds = _MapDataset(input_maps_train, target_maps_train)
+        test_ds = _MapDataset(input_maps_test, target_maps_test)
         train_loader = torch.utils.data.DataLoader(train_ds, batch_size=self.batch_size, shuffle=True)
         test_loader = torch.utils.data.DataLoader(test_ds, batch_size=self.batch_size, shuffle=False)
 
-        in_c = input_maps[0].shape[0]
-        out_c = target_maps[0].shape[0]
+        in_c = input_maps_train[0].shape[0]
+        out_c = target_maps_train[0].shape[0]
         model = MapEstimateNet(in_channels=in_c, out_channels=out_c, size=self.image_size)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info("Training on %s", device)
@@ -233,54 +303,58 @@ class MapBuilderEstimateNet(MapBuilderBase):
         best_test_loss = float("inf")
         best_test_state: dict | None = None
 
-        pbar = tqdm(range(self.epochs), desc="Training", unit="epoch")
-        for _epoch in pbar:
-            model.train()
-            train_loss = 0.0
-            n_train_batches = 0
-            for inp_batch, tgt_batch in train_loader:
-                inp_dev = inp_batch.to(device)
-                tgt_dev = tgt_batch.to(device)
-                optimizer.zero_grad()
-                pred = model(inp_dev)
-                if pred.shape[2:] != tgt_dev.shape[2:]:
-                    pred = nn.functional.interpolate(pred, size=tgt_dev.shape[2:], mode="bilinear")
-                loss = criterion(pred, tgt_dev)
-                loss.backward()
-                optimizer.step()
-                train_loss += loss.item()
-                n_train_batches += 1
-            train_loss /= n_train_batches if n_train_batches else 1
-
-            model.eval()
-            with torch.no_grad():
-                test_loss = 0.0
-                n_test_batches = 0
-                for inp_batch, tgt_batch in test_loader:
+        chunk_size = 10
+        for chunk_start in range(0, self.epochs, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, self.epochs)
+            n_chunk = chunk_end - chunk_start
+            pbar = tqdm(range(n_chunk), desc=f"Epochs {chunk_start + 1}-{chunk_end}", unit="epoch")
+            for _epoch in pbar:
+                model.train()
+                train_loss = 0.0
+                n_train_batches = 0
+                for inp_batch, tgt_batch in train_loader:
                     inp_dev = inp_batch.to(device)
                     tgt_dev = tgt_batch.to(device)
+                    optimizer.zero_grad()
                     pred = model(inp_dev)
                     if pred.shape[2:] != tgt_dev.shape[2:]:
                         pred = nn.functional.interpolate(pred, size=tgt_dev.shape[2:], mode="bilinear")
-                    test_loss += criterion(pred, tgt_dev).item()
-                    n_test_batches += 1
-                test_loss /= n_test_batches if n_test_batches else 1
+                    loss = criterion(pred, tgt_dev)
+                    loss.backward()
+                    optimizer.step()
+                    train_loss += loss.item()
+                    n_train_batches += 1
+                train_loss /= n_train_batches if n_train_batches else 1
 
-            if test_loss < best_test_loss:
-                best_test_loss = test_loss
-                best_test_state = copy.deepcopy(model.state_dict())
-                if self.model_path:
-                    self.model_path.parent.mkdir(parents=True, exist_ok=True)
-                    torch.save(best_test_state, self.model_path)
-                    logger.info("Saved best model (test_loss=%.6f) to %s", best_test_loss, self.model_path)
+                model.eval()
+                with torch.no_grad():
+                    test_loss = 0.0
+                    n_test_batches = 0
+                    for inp_batch, tgt_batch in test_loader:
+                        inp_dev = inp_batch.to(device)
+                        tgt_dev = tgt_batch.to(device)
+                        pred = model(inp_dev)
+                        if pred.shape[2:] != tgt_dev.shape[2:]:
+                            pred = nn.functional.interpolate(pred, size=tgt_dev.shape[2:], mode="bilinear")
+                        test_loss += criterion(pred, tgt_dev).item()
+                        n_test_batches += 1
+                    test_loss /= n_test_batches if n_test_batches else 1
 
-            pbar.set_postfix(train_loss=f"{train_loss:.4f}", test_loss=f"{test_loss:.4f}")
+                if test_loss < best_test_loss:
+                    best_test_loss = test_loss
+                    best_test_state = copy.deepcopy(model.state_dict())
+                    if self.model_path:
+                        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+                        torch.save(best_test_state, self.model_path)
+                        logger.info("Saved best model (test_loss=%.6f) to %s", best_test_loss, self.model_path)
+
+                pbar.set_postfix(train_loss=f"{train_loss:.4f}", test_loss=f"{test_loss:.4f}")
 
         if self.return_model == "lowest_test" and best_test_state is not None:
             model.load_state_dict(best_test_state)
             logger.info("Loaded model with lowest test loss (%.6f)", best_test_loss)
 
-        return model, list(test_ds.indices)
+        return model
 
     def _run_inference(
         self,
@@ -300,22 +374,17 @@ class MapBuilderEstimateNet(MapBuilderBase):
         n_cols = (w + stride - 1) // stride
         pred_sparse = np.zeros((n_rows, n_cols), dtype=np.float32)
         with torch.no_grad():
-            for ri, r in enumerate(range(0, h, stride)):
+            for ri, r in enumerate(tqdm(range(0, h, stride), desc="Inference", unit="row")):
                 for ci, c in enumerate(range(0, w, stride)):
                     lon, lat = rasterio.transform.xy(transform, r, c)
-                    patch = _extract_elevation_patch(
-                        elevation, transform, float(lat), float(lon), self.patch_size_m, self.image_size
-                    )
+                    patch = _extract_elevation_patch(elevation, transform, float(lat), float(lon), self.patch_size_m, self.image_size)
                     patch_batch = patch.unsqueeze(0).to(device)
                     pred = model(patch_batch)
                     val = pred[0, 0, self.image_size // 2, self.image_size // 2].item()
                     pred_sparse[ri, ci] = val
         pred_t = torch.from_numpy(pred_sparse).unsqueeze(0).unsqueeze(0)
         pred_grid = (
-            nn.functional.interpolate(pred_t, size=(h, w), mode="bilinear", align_corners=False)
-            .squeeze()
-            .numpy()
-            .astype(np.float32)
+            nn.functional.interpolate(pred_t, size=(h, w), mode="bilinear", align_corners=False).squeeze().numpy().astype(np.float32)
         )
         pred_grid = np.clip(pred_grid, 0, 1)
         return pred_grid * (strength_hi - strength_lo) + strength_lo
@@ -323,47 +392,44 @@ class MapBuilderEstimateNet(MapBuilderBase):
     def _build_impl(
         self,
         bounding_box: BoundingBox,
-        df: pd.DataFrame,
+        df: pd.DataFrame | None = None,
     ) -> dict[str, VectorMapArray]:
-        """Build strength map by training CNN on elevation patches with MapBuilderConvolution targets."""
-        if df.empty:
-            raise ValueError("No points provided")
-        if "lat" not in df.columns or "lon" not in df.columns:
-            raise ValueError("DataFrame must have columns 'lat' and 'lon'")
+        """Build strength map by loading model from repository and running inference."""
+        from paraai.repository.repository_models import RepositoryModels
 
-        input_maps, target_maps, elevation, transform, strength_lo, strength_hi, strength_arr_raw = (
-            self._build_dataset(bounding_box, df)
+        repo_models = RepositoryModels.get_instance()
+        model_data = repo_models.get_model(self.name, **self.get_model_cache_params())
+        if model_data is None:
+            raise FileNotFoundError(f"Model not found in repository for {self.name}. Run train mode first to train and save the model.")
+
+        repo_terrain = RepositoryTerrain.get_instance()
+        terrain = repo_terrain.get_elevation(bounding_box)
+        elevation = terrain["elevation"]
+        transform = terrain["transform"]
+
+        # strength_lo, strength_hi for denormalization (from df if available)
+        if not df.empty and "strength" in df.columns:
+            strength_vals = df["strength"].to_numpy(dtype=np.float64)
+            valid = strength_vals[~np.isnan(strength_vals) & (strength_vals > 0)]
+            if valid.size > 0:
+                p2, p98 = np.percentile(valid, [2, 98])
+                strength_lo, strength_hi = float(p2), float(p98)
+            else:
+                strength_lo, strength_hi = 0.0, 1.0
+        else:
+            strength_lo, strength_hi = 0.0, 1.0
+        if strength_hi <= strength_lo:
+            strength_hi = strength_lo + 1e-6
+
+        model = MapEstimateNet(
+            in_channels=model_data["in_channels"],
+            out_channels=model_data["out_channels"],
+            size=model_data["image_size"],
         )
-        if not input_maps:
-            raise ValueError("No patches extracted from region")
+        model.load_state_dict(model_data["state_dict"])
 
-        logger.info("Dataset: %s patches", len(input_maps))
-        model, test_indices = self._train_model(input_maps, target_maps)
+        logger.info("Loaded model from repository, running inference")
         strength_arr = self._run_inference(model, elevation, transform, strength_lo, strength_hi)
-
-        true_grid = np.clip(
-            (strength_arr_raw.astype(np.float64) - strength_lo) / (strength_hi - strength_lo),
-            0,
-            1,
-        ).astype(np.float32)
-
-        self._last_model = model
-        self._last_input_maps = input_maps
-        self._last_target_maps = target_maps
-        self._last_test_indices = test_indices
-        self._last_viz_data = {
-            "elevation": elevation,
-            "transform": transform,
-            "lon_min": bounding_box.lon_min,
-            "lat_min": bounding_box.lat_min,
-            "lon_max": bounding_box.lon_max,
-            "lat_max": bounding_box.lat_max,
-            "patch_size_m": self.patch_size_m,
-            "image_size": self.image_size,
-            "true_grid": true_grid,
-            "strength_lo": strength_lo,
-            "strength_hi": strength_hi,
-        }
 
         return {
             "strength": VectorMapArray(

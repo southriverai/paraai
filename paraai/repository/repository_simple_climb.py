@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import logging
@@ -5,6 +6,7 @@ import math
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
 from srai_store.store_provider_base import StoreProviderBase
 from srai_store.store_provider_sqlite import StoreProviderSqlite
 from tqdm import tqdm
@@ -155,6 +157,16 @@ class RepositorySimpleClimb:
                 logger.debug("Failed to cache query results: %s", e)
 
         return results
+
+    def get_climb_dataframe(self, bounding_box: BoundingBox) -> pd.DataFrame:
+        """Load climbs in bounding box as DataFrame with lat, lon, strength (ground points)."""
+        climbs = asyncio.run(self.get_all_in_bounding_box_by_ground(bounding_box))
+        if len(climbs) < 1:
+            raise ValueError("No SimpleClimbs in region")
+        return pd.DataFrame(
+            [(c.ground_lat, c.ground_lon, c.climb_strength_m_s) for c in climbs],
+            columns=["lat", "lon", "strength"],
+        )
 
     def _query_cache_key(self, query: dict) -> str:
         """Stable cache key from query dict."""

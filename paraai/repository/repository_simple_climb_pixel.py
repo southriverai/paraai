@@ -2,13 +2,17 @@
 
 import math
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
+import pandas as pd
 from srai_store.store_provider_base import StoreProviderBase
 from srai_store.store_provider_sqlite import StoreProviderSqlite
 
 from paraai.model.simple_climb_pixel import SimpleClimbPixel
 from paraai.tool_spacetime import haversine_m
+
+if TYPE_CHECKING:
+    from paraai.model.boundingbox import BoundingBox
 
 METERS_PER_DEG_LAT = 111_000
 BATCH_SIZE = 500
@@ -87,3 +91,15 @@ class RepositorySimpleClimbPixel:
         deg_lon = radius_m / (METERS_PER_DEG_LAT * math.cos(math.radians(lat_deg)))
         bbox = self.get_all_in_bounding_box(lat_deg - deg_lat, lat_deg + deg_lat, lng_deg - deg_lon, lng_deg + deg_lon)
         return [p for p in bbox if haversine_m(p.lat, p.lon, lat_deg, lng_deg) <= radius_m]
+
+    def get_climb_dataframe(self, bounding_box: "BoundingBox") -> pd.DataFrame:
+        """Load climb pixels in bounding box as DataFrame with lat, lon, count, strength."""
+        pixels = self.get_all_in_bounding_box(
+            bounding_box.lat_min, bounding_box.lat_max, bounding_box.lon_min, bounding_box.lon_max
+        )
+        if len(pixels) < 1:
+            raise ValueError("No SimpleClimbPixels in region")
+        return pd.DataFrame(
+            [(p.lat, p.lon, p.climb_count, p.mean_climb_strength_m_s) for p in pixels],
+            columns=["lat", "lon", "count", "strength"],
+        )

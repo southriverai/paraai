@@ -17,8 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 class MapBuilderAverage(MapBuilderBase):
-    def __init__(self, output_map_names: list[str] | None = None):
-        super().__init__(name="MapBuilderAverage", output_map_names=output_map_names)
+    def __init__(
+        self,
+    ):
+        super().__init__(name="MapBuilderAverage", output_map_names=["count", "strength"])
 
     def _build_impl(
         self,
@@ -48,8 +50,14 @@ class MapBuilderAverage(MapBuilderBase):
         bounds = rasterio.transform.array_bounds(dem_shape[0], dem_shape[1], transform)
         logger.info(
             "DEM extent: lon=%.4f-%.4f, lat=%.4f-%.4f (bbox requested: lon=%.4f-%.4f, lat=%.4f-%.4f)",
-            bounds[0], bounds[2], bounds[1], bounds[3],
-            bounding_box.lon_min, bounding_box.lon_max, bounding_box.lat_min, bounding_box.lat_max,
+            bounds[0],
+            bounds[2],
+            bounds[1],
+            bounds[3],
+            bounding_box.lon_min,
+            bounding_box.lon_max,
+            bounding_box.lat_min,
+            bounding_box.lat_max,
         )
 
         strength_grid = np.zeros(dem_shape, dtype=np.float32)
