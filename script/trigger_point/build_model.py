@@ -16,6 +16,7 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset
 
+from paraai.map.map_estimate_net import MapEstimateNet
 from paraai.repository.repository_trigger_point import RepositoryTriggerPoint
 from paraai.tool_spacetime import haversine_km_tuple
 from paraai.tools_terrain import load_terrain
@@ -59,36 +60,6 @@ class MapDataset(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         return self.input_maps[idx], self.target_maps[idx]
-
-
-class MapEstimateNet(nn.Module):
-    """CNN that estimates a target map from an input map patch."""
-
-    def __init__(self, in_channels: int = 3, out_channels: int = 1, size: int = 64) -> None:
-        super().__init__()
-        self.size = size
-        self.encoder = nn.Sequential(
-            nn.Conv2d(in_channels, 32, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-        )
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, out_channels, 4, stride=2, padding=1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.encoder(x)
-        return self.decoder(h)
 
 
 def _latlon_to_bbox(lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:

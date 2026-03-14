@@ -37,10 +37,12 @@ class MapBuilderBase:
     def __init__(
         self,
         name: str,
-        output_map_names: list[str] | None = None,
+        output_map_names: list[str],
     ):
         self.name = name
-        self.output_map_names = output_map_names if output_map_names is not None else ["strength", "count"]
+        if len(output_map_names) == 0:
+            raise ValueError("output_map_names must be a non-empty list")
+        self.output_map_names = output_map_names
 
     def get_cache_params(self) -> dict:
         """Params for cache key. Override in subclasses (e.g. kernel_size_m)."""

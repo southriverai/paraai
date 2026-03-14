@@ -62,6 +62,7 @@ class MapBuilderFlatlandTorch(MapBuilderBase):
         terrain = repo_terrain.get_elevation(bounding_box)
         elevation = terrain["elevation"].astype(np.float32)
         elevation = np.nan_to_num(elevation, nan=0.0)
+        transform = terrain["transform"]
 
         elev_t = torch.from_numpy(elevation).to(self.device)
         # Add batch and channel dims: (1, 1, H, W)
@@ -98,11 +99,13 @@ class MapBuilderFlatlandTorch(MapBuilderBase):
                 "std",
                 bounding_box,
                 std_elev,
+                transform=transform,
             ),
             "planarity": VectorMapArray(
                 "planarity",
                 bounding_box,
                 planarity,
+                transform=transform,
             ),
         }
 

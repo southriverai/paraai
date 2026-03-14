@@ -1,24 +1,33 @@
-"""Map builder: estimate climb maps from points using convolution."""
+"""Map builder: estimate climb maps and exploration density from points."""
 
 from __future__ import annotations
 
 import logging
+import math
 
 import numpy as np
 import pandas as pd
 import rasterio.transform
+from scipy.ndimage import convolve
 
 from paraai.map.map_builder_base import MapBuilderBase
 from paraai.map.vectror_map_array import VectorMapArray
 from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_terrain import RepositoryTerrain
+from paraai.tool_spacetime import dem_pixel_size_m
 
 logger = logging.getLogger(__name__)
 
 
-class MapBuilderAverage(MapBuilderBase):
-    def __init__(self, output_map_names: list[str] | None = None):
-        super().__init__(name="MapBuilderAverage", output_map_names=output_map_names)
+class MapBuilderDensity(MapBuilderBase):
+    def __init__(self, list_radius_m: list[float] | None = None):
+        list_radius_m = list_radius_m or [200.0]
+        output_names = ["strength", "count", "data_density"] + [f"count_within_{r}m" for r in list_radius_m]
+        super().__init__(name="MapBuilderDensity", output_map_names=output_names)
+        self.list_radius_m = list_radius_m
+
+    def get_cache_params(self) -> dict:
+        return {"list_radius_m": self.list_radius_m}
 
     def _build_impl(
         self,
@@ -37,20 +46,6 @@ class MapBuilderAverage(MapBuilderBase):
         elevation = terrain["elevation"]
         transform = terrain["transform"]
         dem_shape = elevation.shape
-        # TODO do this without getting the terrain
-
-        # Build count and strength grids from training points only
-        lat_min, lat_max = df["lat"].min(), df["lat"].max()
-        lon_min, lon_max = df["lon"].min(), df["lon"].max()
-        logger.info("Dataset: lat_min=%.4f, lat_max=%.4f, lon_min=%.4f, lon_max=%.4f", lat_min, lat_max, lon_min, lon_max)
-
-        # Log DEM extent vs bbox: DEM may cover larger area (tile-aligned)
-        bounds = rasterio.transform.array_bounds(dem_shape[0], dem_shape[1], transform)
-        logger.info(
-            "DEM extent: lon=%.4f-%.4f, lat=%.4f-%.4f (bbox requested: lon=%.4f-%.4f, lat=%.4f-%.4f)",
-            bounds[0], bounds[2], bounds[1], bounds[3],
-            bounding_box.lon_min, bounding_box.lon_max, bounding_box.lat_min, bounding_box.lat_max,
-        )
 
         strength_grid = np.zeros(dem_shape, dtype=np.float32)
         count_grid = np.zeros(dem_shape, dtype=np.float32)
@@ -71,7 +66,12 @@ class MapBuilderAverage(MapBuilderBase):
 
         np.divide(strength_grid, count_grid, out=strength_grid, where=count_grid > 0)
 
-        return {
+        # data_density: sum of counts within radius; high = explored, 0 = unexplored
+        # Pixels with count=0 but data_density>0 = explored but yielded no points
+        center_lat = (bounding_box.lat_min + bounding_box.lat_max) / 2
+        width_m, height_m = dem_pixel_size_m(center_lat)
+
+        result: dict[str, VectorMapArray] = {
             "strength": VectorMapArray(
                 "strength",
                 bounding_box,
@@ -85,3 +85,23 @@ class MapBuilderAverage(MapBuilderBase):
                 transform=transform,
             ),
         }
+
+        for radius_m in self.list_radius_m:
+            radius_x = int(math.ceil(radius_m / width_m))
+            radius_y = int(math.ceil(radius_m / height_m))
+            size_x, size_y = 2 * radius_x + 1, 2 * radius_y + 1
+            kernel = np.ones((size_y, size_x), dtype=np.float64)
+            density = convolve(count_grid.astype(np.float64), kernel, mode="constant", cval=0).astype(np.float32)
+            name = f"count_within_{radius_m}m"
+            result[name] = VectorMapArray(name, bounding_box, density, transform=transform)
+
+        # data_density: exploration density (same as count_within for first radius)
+        first_density = result[f"count_within_{self.list_radius_m[0]}m"].array
+        result["data_density"] = VectorMapArray(
+            "data_density",
+            bounding_box,
+            first_density,
+            transform=transform,
+        )
+
+        return result

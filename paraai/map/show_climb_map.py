@@ -3,12 +3,95 @@
 from __future__ import annotations
 
 import logging
+import random
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.gridspec import GridSpec
 
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from paraai.map.vectror_map_array import VectorMapArray
+
 logger = logging.getLogger(__name__)
+
+
+def show_map_eval(
+    vector_map: VectorMapArray,
+    holdout_df: pd.DataFrame,
+    *,
+    column_name: str = "strength",
+    title: str | None = None,
+    show_random_points: bool = True,
+    elevation: np.ndarray | None = None,
+) -> None:
+    """Scatter plot of map predicted values vs holdout dataframe values, plus vector map."""
+    if holdout_df.empty or column_name not in holdout_df.columns:
+        return
+    plot_df = holdout_df.sample(n=min(10_000, len(holdout_df)), random_state=42) if len(holdout_df) > 10_000 else holdout_df
+    pred = vector_map.get_values(plot_df["lat"].to_numpy(), plot_df["lon"].to_numpy())
+    actual = plot_df[column_name].to_numpy()
+
+    fig, (ax_map, ax_scatter) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Vector map: use actual transform extent (DEM may cover larger area than bbox)
+    import rasterio.transform as rio_transform
+
+    extent = list(rio_transform.array_bounds(vector_map.array.shape[0], vector_map.array.shape[1], vector_map.transform))
+    # array_bounds returns (left, bottom, right, top); imshow extent is [left, right, bottom, top]
+    extent = [extent[0], extent[2], extent[1], extent[3]]
+    # Heightmap background
+    if elevation is not None and elevation.shape == vector_map.array.shape:
+        elev_display = np.flipud(
+            np.clip(
+                (elevation - np.nanpercentile(elevation, 2))
+                / (np.nanpercentile(elevation, 98) - np.nanpercentile(elevation, 2) + 1e-10),
+                0,
+                1,
+            )
+        )
+        ax_map.imshow(elev_display, extent=extent, origin="lower", cmap="gray", interpolation="nearest")
+    map_grid = np.flipud(vector_map.array)
+    map_masked = np.ma.masked_where(map_grid == 0, map_grid)
+    im = ax_map.imshow(map_masked, extent=extent, origin="lower", cmap="coolwarm", interpolation="nearest", alpha=0.7 if elevation is not None else 1.0)
+    ax_map.set_xlabel("Longitude")
+    ax_map.set_ylabel("Latitude")
+    ax_map.set_aspect("equal")
+    ax_map.set_title(f"Map: {vector_map.map_name}")
+    fig.colorbar(im, ax=ax_map, label=column_name)
+
+    # Scatter: actual vs predicted
+    ax_scatter.scatter(actual, pred, alpha=0.3, s=5)
+    vmin = min(actual.min(), pred.min())
+    vmax = max(actual.max(), pred.max())
+    ax_scatter.plot([vmin, vmax], [vmin, vmax], "k--", alpha=0.5, label="Perfect")
+    ax_scatter.set_xlabel(f"Actual {column_name}")
+    ax_scatter.set_ylabel(f"Predicted {column_name}")
+    ax_scatter.set_aspect("equal")
+    ax_scatter.legend()
+    ax_scatter.set_title("Actual vs predicted")
+
+    if show_random_points and len(plot_df) > 0:
+        idx = random.choice(plot_df.index)
+        row = plot_df.loc[idx]
+        pt_lat, pt_lon = row["lat"], row["lon"]
+        pt_actual = row[column_name]
+        pt_pred = vector_map.get_values(np.array([pt_lat]), np.array([pt_lon]))[0]
+        # Map: mark location
+        ax_map.plot(pt_lon, pt_lat, "r.", markersize=10)
+        ax_map.axvline(pt_lon, color="r", linestyle=":", alpha=0.7)
+        ax_map.axhline(pt_lat, color="r", linestyle=":", alpha=0.7)
+        # Scatter: red dotted lines to axes for actual and predicted
+        ax_scatter.plot([pt_actual, pt_actual], [vmin, pt_pred], "r:", alpha=0.8)
+        ax_scatter.plot([vmin, pt_actual], [pt_pred, pt_pred], "r:", alpha=0.8)
+        ax_scatter.plot(pt_actual, pt_pred, "r.", markersize=10)
+
+    if title:
+        fig.suptitle(title)
+    plt.tight_layout()
+    plt.show()
 
 
 def show_climb_map(

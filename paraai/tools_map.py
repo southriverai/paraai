@@ -84,6 +84,7 @@ def load_map(
         map_name=map_name,
         bounding_box=bounding_box,
         array=array.astype(np.float32),
+        transform=transform,
     )
     logger.debug("Loaded map from cache %s", path)
     return vma

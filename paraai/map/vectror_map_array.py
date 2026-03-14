@@ -16,19 +16,24 @@ class VectorMapArray:
         map_name: str,
         bounding_box: BoundingBox,
         array: np.ndarray,
+        *,
+        transform: rasterio.transform.Affine | None = None,
     ):
         self.map_name = map_name
         self.bounding_box = bounding_box
         self.array = array
-        # Rasterio: row 0 = north. from_bounds(west, south, east, north, width, height)
-        self.transform = rasterio.transform.from_bounds(
-            bounding_box.lon_min,
-            bounding_box.lat_min,
-            bounding_box.lon_max,
-            bounding_box.lat_max,
-            array.shape[1],
-            array.shape[0],
-        )
+        # Use provided transform (e.g. from DEM) so array indices match; else assume array covers bounding_box
+        if transform is not None:
+            self.transform = transform
+        else:
+            self.transform = rasterio.transform.from_bounds(
+                bounding_box.lon_min,
+                bounding_box.lat_min,
+                bounding_box.lon_max,
+                bounding_box.lat_max,
+                array.shape[1],
+                array.shape[0],
+            )
 
     @property
     def profile(self) -> dict:

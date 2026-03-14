@@ -5,7 +5,7 @@ from datetime import datetime
 
 import numpy as np
 
-from paraai.model.boundingbox import BoundingBox
+from paraai.model.boundingbox import REGION_DICT, BoundingBox, BoundingBoxRegion
 
 # Europe bounds (lat min, lat max, lon min, lon max): ~Iberia to Nordkapp, Ireland to Urals
 EUROPE_BOUNDS: tuple[float, float, float, float] = (36.0, 72.0, -11.0, 42.0)
@@ -31,12 +31,16 @@ REGION_BOUNDS: dict[str, BoundingBox] = {
 }
 
 
+def get_region_bounding_box(region_name: str) -> BoundingBoxRegion | None:
+    return REGION_DICT.get(region_name.lower())
+
+
 def is_in_region(region_name: str, lat: float, lon: float) -> bool:
-    bounds = REGION_BOUNDS.get(region_name.lower())
-    if bounds is None:
+    region_bounding_box = get_region_bounding_box(region_name)
+    if region_bounding_box is None:
         return False
-    lat_min, lat_max, lon_min, lon_max = bounds
-    return lat_min <= lat <= lat_max and lon_min <= lon <= lon_max
+
+    return bounding_box.is_in(lat, lon)
 
 
 def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:

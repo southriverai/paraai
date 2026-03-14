@@ -81,6 +81,7 @@ class MapBuilderFlatland(MapBuilderBase):
         terrain = repo_terrain.get_elevation(bounding_box)
         elevation = terrain["elevation"].astype(np.float64)
         elevation = np.nan_to_num(elevation, nan=0.0)
+        transform = terrain["transform"]
 
         # Std of elevation within radius: sqrt(mean(z^2) - mean(z)^2)
         mean_z = uniform_filter(elevation, size=(size_y, size_x), mode="constant", cval=0)
@@ -138,10 +139,12 @@ class MapBuilderFlatland(MapBuilderBase):
                 "std",
                 bounding_box,
                 std_elev,
+                transform=transform,
             ),
             "planarity": VectorMapArray(
                 "planarity",
                 bounding_box,
                 planarity,
+                transform=transform,
             ),
         }

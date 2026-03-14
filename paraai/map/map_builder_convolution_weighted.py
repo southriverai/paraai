@@ -6,13 +6,11 @@ import logging
 
 import numpy as np
 import pandas as pd
-import rasterio.transform
 from scipy.ndimage import convolve
 
 from paraai.map.map_builder_base import MapBuilderBase
 from paraai.map.vectror_map_array import VectorMapArray
 from paraai.model.boundingbox import BoundingBox
-from paraai.repository.repository_terrain import RepositoryTerrain
 from paraai.tool_spacetime import build_gaussian_kernel_meters
 
 logger = logging.getLogger(__name__)
@@ -48,35 +46,14 @@ class MapBuilderConvolutionWeighted(MapBuilderBase):
             raise ValueError("No points provided")
         if "lat" not in df.columns or "lon" not in df.columns:
             raise ValueError("DataFrame must have columns 'lat' and 'lon'")
-        count_col = "count" if "count" in df.columns else None
-        strength_col = "strength" if "strength" in df.columns else None
 
-        # Load DEM
-        repo_terrain = RepositoryTerrain.get_instance()
-        terrain = repo_terrain.get_elevation(bounding_box)
-        elevation = terrain["elevation"]
-        transform = terrain["transform"]
+        # Build count and strength grids using the average builder
+        from paraai.map.map_builder_average import MapBuilderAverage
 
-        # Remove flat pixels: compute gradient magnitude, exclude points in flat cells
-        grad_y, grad_x = np.gradient(elevation)
-        grad_mag = np.sqrt(grad_x**2 + grad_y**2)
-        grad_m_mag = grad_mag * 30  # 1 arc-sec ≈ 30m per pixel
-        is_flat = grad_m_mag < self.flat_gradient_threshold_m
-
-        # Build count and strength grids
-        count_grid = np.zeros(elevation.shape, dtype=np.float32)
-        strength_grid = np.zeros(elevation.shape, dtype=np.float32)
-        for _, row in df.iterrows():
-            lat, lon = row["lat"], row["lon"]
-            count = row[count_col] if count_col else 1.0
-            strength = row[strength_col] if strength_col else 0.0
-            row_idx, col_idx = rasterio.transform.rowcol(transform, [lon], [lat])
-            r, c = int(row_idx[0]), int(col_idx[0])
-            if 0 <= r < elevation.shape[0] and 0 <= c < elevation.shape[1] and is_flat[r, c]:
-                continue
-            if 0 <= r < count_grid.shape[0] and 0 <= c < count_grid.shape[1]:
-                count_grid[r, c] = count
-                strength_grid[r, c] = strength
+        builder = MapBuilderAverage()
+        maps = builder.build(bounding_box, df)
+        count_grid = maps["count"].array
+        strength_grid = maps["strength"].array
 
         # Convolve with Gaussian kernel, weighted by count
         center_lat = (bounding_box.lat_min + bounding_box.lat_max) / 2
@@ -98,15 +75,18 @@ class MapBuilderConvolutionWeighted(MapBuilderBase):
                 0.0,
             ).astype(np.float32)
 
+        transform = maps["count"].transform
         return {
             "strength": VectorMapArray(
                 "strength",
                 bounding_box,
                 estimated_strength.astype(np.float32),
+                transform=transform,
             ),
             "count": VectorMapArray(
                 "count",
                 bounding_box,
                 estimated_count.astype(np.float32),
+                transform=transform,
             ),
         }

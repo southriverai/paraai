@@ -8,7 +8,6 @@ Usage examples:
   poetry run python script/map/eval_map_builder.py --region sopot
   poetry run python script/map/eval_map_builder.py --region bassano
   poetry run python script/map/eval_map_builder.py --region bansko --holdout-ratio 0.2
-  poetry run python script/map/eval_map_builder.py --region europe --holdout-ratio 0.1 --seed 123
 """
 
 from __future__ import annotations
@@ -17,20 +16,21 @@ import argparse
 import asyncio
 import logging
 import random
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-import rasterio.transform
 
 from paraai.map.map_builder_average import MapBuilderAverage
-from paraai.map.map_builder_convolution import MapBuilderConvolution
 from paraai.map.map_builder_flatland_torch import MapBuilderFlatlandTorch
-from paraai.map.show_climb_map import show_climb_map
-from paraai.model.boundingbox import BoundingBox
+from paraai.map.show_climb_map import show_map_eval
 from paraai.repository.repository_simple_climb import RepositorySimpleClimb
 from paraai.repository.repository_terrain import RepositoryTerrain
 from paraai.setup import setup
 from paraai.tool_spacetime import REGION_BOUNDS
+
+if TYPE_CHECKING:
+    from paraai.model.boundingbox import BoundingBox
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,6 +55,8 @@ def partition_dataframe(
 
 
 async def main(region_name: str, bounding_box: BoundingBox) -> None:
+    logger.info(f"Evaluating map builders for {region_name} with bounding box {bounding_box}")
+
     repo_climb = RepositorySimpleClimb.get_instance()
     repo_terrain = RepositoryTerrain.get_instance()
 
@@ -91,9 +93,11 @@ async def main(region_name: str, bounding_box: BoundingBox) -> None:
     train_df, holdout_df = partition_dataframe(climbs_df_no_flatland, args.holdout_ratio, seed=args.seed)
 
     # show the train and holdout dataframes
-    logger.info("Train dataframe: %s", train_df.head())
+    logger.info("Train dataframe: \n%s", train_df.head())
 
     # All builder configs: (display_name, builder_instance)
+    from paraai.map.map_builder_convolution import MapBuilderConvolution
+
     configs = [
         ("Average", MapBuilderAverage()),
         ("Convolution 100m", MapBuilderConvolution(kernel_size_m=100)),
@@ -105,7 +109,11 @@ async def main(region_name: str, bounding_box: BoundingBox) -> None:
     results: list[tuple[str, object, dict]] = []
 
     for display_name, builder in configs:
-        maps = builder.build(bounding_box, train_df)
+        maps = builder.build(
+            bounding_box,
+            train_df,
+            ignore_cache=True,
+        )
         count_vma = maps["count"]
         strength_vma = maps["strength"]
         eval_result = builder.evaluate(
@@ -131,25 +139,12 @@ async def main(region_name: str, bounding_box: BoundingBox) -> None:
 
     print(f"\nBest: {best_name} (strength_mae={best_eval.strength_mae:.4f} m/s)\n")
 
-    # Load terrain for chart
-
-    terrain = repo_terrain.get_elevation(bounding_box)
-    elevation = terrain["elevation"]
-    transform = terrain["transform"]
-    bounds_arr = rasterio.transform.array_bounds(elevation.shape[0], elevation.shape[1], transform)
-    extent = [bounds_arr[0], bounds_arr[2], bounds_arr[1], bounds_arr[3]]
-
-    count_grid = np.flipud(best_maps["count_vma"].array)
-    strength_grid = np.flipud(best_maps["strength_vma"].array)
-
-    show_climb_map(
-        elevation,
-        extent,
-        count_grid,
-        strength_grid,
-        title=f"{best_name}: {region_name} (n_train={len(train_df)}, n_holdout={len(holdout_df)})",
-        count_title=f"Climb count by pixel ({best_name})",
-        strength_title=f"Mean climb strength by pixel ({best_name})",
+    show_map_eval(
+        best_maps["strength_vma"],
+        holdout_df,
+        column_name="strength",
+        title=f"{best_name}: {region_name}",
+        elevation=elevation,
     )
 
 
