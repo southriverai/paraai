@@ -57,6 +57,8 @@ from paraai.tools_datasets import split_dataframe
 
 logger = logging.getLogger(__name__)
 
+BATCH_SIZE = 64
+
 
 class MapDataset(Dataset):
     """Dataset of (input_map, target_map) pairs as tensors."""
@@ -139,7 +141,6 @@ def run_train_mode(
     region: str,
     test_frac: float,
     split_seed: int,
-    batch_size: int,
     lr: float,
     epochs: int,
     builder: MapBuilderEstimateSimple | MapBuilderEstimateTime,
@@ -148,10 +149,15 @@ def run_train_mode(
     bounding_box = get_bounding_box(region)
     climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
     train_df, test_df = split_dataframe(climb_df, test_frac, split_seed)
+    kwargs: dict = {}
+    if isinstance(builder, MapBuilderEstimateTime):
+        kwargs["test_frac"] = test_frac
+        kwargs["split_seed"] = split_seed
     data = builder.get_or_build_dataset(
         bounding_box,
         train_df,
         test_df,
+        **kwargs,
     )
 
     input_maps_train = data["input_maps_train"]
@@ -171,19 +177,23 @@ def run_train_mode(
     logger.info("Training on %s", device)
 
     is_time_builder = isinstance(builder, MapBuilderEstimateTime)
+
+    # Preload all data to GPU once (avoids per-batch transfer overhead)
+    logger.info("Loading data to %s...", device)
+    train_inp = torch.stack(input_maps_train).to(device)
+    train_tgt = torch.stack(target_maps_train).to(device)
+    test_inp = torch.stack(input_maps_test).to(device)
+    test_tgt = torch.stack(target_maps_test).to(device)
     if is_time_builder:
         time_day_train = data["time_of_day_train"]
         time_year_train = data["time_of_year_train"]
         time_day_test = data["time_of_day_test"]
         time_year_test = data["time_of_year_test"]
-        train_ds = MapDatasetTime(input_maps_train, time_day_train, time_year_train, target_maps_train)
-        test_ds = MapDatasetTime(input_maps_test, time_day_test, time_year_test, target_maps_test)
+        train_td = torch.tensor(time_day_train, dtype=torch.float32, device=device)
+        train_ty = torch.tensor(time_year_train, dtype=torch.float32, device=device)
+        test_td = torch.tensor(time_day_test, dtype=torch.float32, device=device)
+        test_ty = torch.tensor(time_year_test, dtype=torch.float32, device=device)
 
-    else:
-        train_ds = MapDataset(input_maps_train, target_maps=target_maps_train)
-        test_ds = MapDataset(input_maps_test, target_maps=target_maps_test)
-    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=False)
     model = builder._get_model_class()(in_channels=in_c, out_channels=out_c, size=image_size).to(device)
     # print model architecture
     logger.info("Model class: %s", builder._get_model_class())
@@ -195,26 +205,28 @@ def run_train_mode(
     best_test_loss = float("inf")
     best_state: dict | None = None
 
+    n_train = len(train_inp)
+    n_test = len(test_inp)
+
     t_start = time.perf_counter()
     for epoch in range(epochs):
         model.train()
+        perm = torch.randperm(n_train, device=device)
         train_loss = 0.0
         n_b = 0
-        for batch in train_loader:
+        for i in range(0, n_train, BATCH_SIZE):
+            idx = perm[i : i + BATCH_SIZE]
+            batch_inp = train_inp[idx]
+            batch_tgt = train_tgt[idx]
             if is_time_builder:
-                inp, td, ty, tgt = batch
-                inp_dev = inp.to(device)
-                td_dev = td.to(device)
-                ty_dev = ty.to(device)
-                tgt_dev = tgt.to(device)
-                pred = model(inp_dev, td_dev, ty_dev)
+                batch_td = train_td[idx]
+                batch_ty = train_ty[idx]
+                pred = model(batch_inp, batch_td, batch_ty)
             else:
-                inp, tgt = batch
-                inp_dev, tgt_dev = inp.to(device), tgt.to(device)
-                pred = model(inp_dev)
-                if pred.shape[2:] != tgt_dev.shape[2:]:
-                    pred = nn.functional.interpolate(pred, size=tgt_dev.shape[2:], mode="bilinear")
-            loss = criterion(pred, tgt_dev)
+                pred = model(batch_inp)
+                if pred.shape[2:] != batch_tgt.shape[2:]:
+                    pred = nn.functional.interpolate(pred, size=batch_tgt.shape[2:], mode="bilinear")
+            loss = criterion(pred, batch_tgt)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -226,21 +238,18 @@ def run_train_mode(
         test_loss = 0.0
         n_b = 0
         with torch.no_grad():
-            for batch in test_loader:
+            for i in range(0, n_test, BATCH_SIZE):
+                batch_inp = test_inp[i : i + BATCH_SIZE]
+                batch_tgt = test_tgt[i : i + BATCH_SIZE]
                 if is_time_builder:
-                    inp, td, ty, tgt = batch
-                    inp_dev = inp.to(device)
-                    td_dev = td.to(device)
-                    ty_dev = ty.to(device)
-                    tgt_dev = tgt.to(device)
-                    pred = model(inp_dev, td_dev, ty_dev)
+                    batch_td = test_td[i : i + BATCH_SIZE]
+                    batch_ty = test_ty[i : i + BATCH_SIZE]
+                    pred = model(batch_inp, batch_td, batch_ty)
                 else:
-                    inp, tgt = batch
-                    inp_dev, tgt_dev = inp.to(device), tgt.to(device)
-                    pred = model(inp_dev)
-                    if pred.shape[2:] != tgt_dev.shape[2:]:
-                        pred = nn.functional.interpolate(pred, size=tgt_dev.shape[2:], mode="bilinear")
-                test_loss += criterion(pred, tgt_dev).item()
+                    pred = model(batch_inp)
+                    if pred.shape[2:] != batch_tgt.shape[2:]:
+                        pred = nn.functional.interpolate(pred, size=batch_tgt.shape[2:], mode="bilinear")
+                test_loss += criterion(pred, batch_tgt).item()
                 n_b += 1
         test_loss /= n_b if n_b else 1
 
@@ -387,13 +396,12 @@ def run_train_eval_mode(
     region: str,
     test_frac: float,
     split_seed: int,
-    batch_size: int,
     lr: float,
     epochs: int,
     builder: MapBuilderEstimateSimple | MapBuilderEstimateTime,
 ) -> None:
     """Train model, then evaluate on holdout. No map building - inference on test patches only."""
-    run_train_mode(region, test_frac, split_seed, batch_size, lr, epochs, builder)
+    run_train_mode(region, test_frac, split_seed, lr, epochs, builder)
     bounding_box = get_bounding_box(region)
     climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
     train_df, holdout_df = split_dataframe(climb_df, test_frac, split_seed)
@@ -500,7 +508,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-size", type=int, default=64, help="Patch resolution")
     parser.add_argument("--grid-stride", type=int, default=16, help="Stride for sampling grid")
     parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--test-frac", type=float, default=0.2, help="Fraction for test set")
     parser.add_argument("--split-seed", type=int, default=42)
@@ -548,13 +555,13 @@ if __name__ == "__main__":
     elif args.mode == "dataset":
         run_dataset_mode(region, test_frac, split_seed, builder)
     elif args.mode == "train":
-        run_train_mode(region, test_frac, split_seed, args.batch_size, args.lr, args.epochs, builder)
+        run_train_mode(region, test_frac, split_seed, args.lr, args.epochs, builder)
     elif args.mode == "estimate":
         run_estimate_mode(region, builder)
     elif args.mode == "eval":
         run_eval_mode(region, test_frac, split_seed, builder)
     elif args.mode == "train_eval":
-        run_train_eval_mode(region, test_frac, split_seed, args.batch_size, args.lr, args.epochs, builder)
+        run_train_eval_mode(region, test_frac, split_seed, args.lr, args.epochs, builder)
     elif args.mode == "eval_show":
         run_eval_show_mode(region, test_frac, split_seed, builder)
     else:
