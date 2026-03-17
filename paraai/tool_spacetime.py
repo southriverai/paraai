@@ -121,3 +121,11 @@ def utc_to_solar_hour(dt: datetime, longitude_deg: float) -> float:
     utc_hour_frac = dt.hour + dt.minute / 60 + dt.second / 3600
     solar_hour = utc_hour_frac + longitude_deg / 15
     return solar_hour % 24
+
+
+def utc_to_day_of_year(dt: datetime) -> float:
+    """Convert UTC datetime to day of year as float. 0 = Jan 1 00:00, 365.x = Dec 31."""
+    tt = dt.timetuple()
+    day_num = tt.tm_yday  # 1-366
+    frac = (dt.hour + dt.minute / 60 + dt.second / 3600) / 24
+    return (day_num - 1) + frac

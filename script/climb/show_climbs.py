@@ -10,6 +10,7 @@ from scipy import stats
 
 from paraai.repository.repository_climb import RepositoryClimb
 from paraai.repository.repository_tracklog_body import RepositoryTracklogBody
+from paraai.setup import setup
 
 
 def climb_vertical_speed_m_s(climb) -> float | None:
@@ -33,21 +34,17 @@ def climb_duration_s(climb) -> float | None:
     return float(dt) if dt > 0 else None
 
 
-def main():
+async def main():
     path_dir_database = Path("data", "database_sqlite")
     RepositoryTracklogBody.initialize_sqlite(path_dir_database)
     repo_climb = RepositoryClimb.initialize_sqlite(path_dir_database)
 
-    climbs = repo_climb.get_all()
+    climbs = repo_climb.aget_all()
 
     # Europe bounding box - filter early, no data outside Europe is processed
     europe_lng_min, europe_lat_min = -10, 35
     europe_lng_max, europe_lat_max = 40, 71
-    climbs = [
-        c
-        for c in climbs
-        if europe_lng_min <= c.lng <= europe_lng_max and europe_lat_min <= c.lat <= europe_lat_max
-    ]
+    climbs = [c for c in climbs if europe_lng_min <= c.lng <= europe_lng_max and europe_lat_min <= c.lat <= europe_lat_max]
     print(f"Climbs in Europe: {len(climbs)}")
 
     # Seasons: winter months (Dec, Jan, Feb) go to spring/autumn
@@ -145,18 +142,10 @@ def main():
     ax_pdf.grid(True, alpha=0.3)
 
     # Shared axis limits for scatter subplots (5th–95th percentile to exclude outliers)
-    all_means = [
-        m for means, _ in season_points.values() for m in means
-    ]
-    all_stds = [
-        s for _, stds in season_points.values() for s in stds
-    ]
-    scatter_x_min, scatter_x_max = (
-        np.percentile(all_means, [5, 95]) if all_means else (0, 1)
-    )
-    scatter_y_min, scatter_y_max = (
-        np.percentile(all_stds, [5, 95]) if all_stds else (0, 1)
-    )
+    all_means = [m for means, _ in season_points.values() for m in means]
+    all_stds = [s for _, stds in season_points.values() for s in stds]
+    scatter_x_min, scatter_x_max = np.percentile(all_means, [5, 95]) if all_means else (0, 1)
+    scatter_y_min, scatter_y_max = np.percentile(all_stds, [5, 95]) if all_stds else (0, 1)
 
     # 2D grid for KDE evaluation (shared across subplots)
     scatter_xx = np.linspace(scatter_x_min, scatter_x_max, 100)
@@ -197,9 +186,7 @@ def main():
     for c in climbs:
         if not c.list_timestamp_utc:
             continue
-        date_key = datetime.fromtimestamp(
-            c.list_timestamp_utc[0], tz=timezone.utc
-        ).strftime("%Y-%m-%d")
+        date_key = datetime.fromtimestamp(c.list_timestamp_utc[0], tz=timezone.utc).strftime("%Y-%m-%d")
         climbs_by_date[date_key].append(c)
 
     busiest_date = max(climbs_by_date.keys(), key=lambda d: len(climbs_by_date[d]))
@@ -247,9 +234,7 @@ def main():
         ax_scatter.contourf(xx_mesh, yy_mesh, z, levels=15, alpha=0.6, cmap="Blues")
         ax_scatter.contour(xx_mesh, yy_mesh, z, levels=8, colors="steelblue", linewidths=0.8)
         ax_scatter.scatter(busiest_speeds, busiest_times_of_day, alpha=0.8, s=20, edgecolors="black")
-    ax_scatter.yaxis.set_major_formatter(
-        FuncFormatter(lambda h, _: f"{int(h):02d}:{int((h % 1) * 60):02d}")
-    )
+    ax_scatter.yaxis.set_major_formatter(FuncFormatter(lambda h, _: f"{int(h):02d}:{int((h % 1) * 60):02d}"))
     ax_scatter.set_xlabel("Vertical speed (m/s)")
     ax_scatter.set_ylabel("Time of day (UTC)")
     ax_scatter.set_title(f"Climb strength vs time of day on {busiest_date}")
@@ -260,4 +245,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    setup()
+    asyncio.run(main())

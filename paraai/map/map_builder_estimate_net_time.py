@@ -225,6 +225,10 @@ class MapBuilderEstimateNet(MapBuilderBase):
                 raise ValueError(f"{name} must have columns 'lat' and 'lon'")
             if "strength" not in df.columns:
                 raise ValueError(f"{name} must have column 'strength'")
+            if "time_of_day_h" not in df.columns:
+                raise ValueError(f"{name} must have column 'time_of_day_h'")
+            if "time_of_year_d" not in df.columns:
+                raise ValueError(f"{name} must have column 'time_of_year_d'")
 
         cache_params = (
             self.get_dataset_cache_params(test_frac, split_seed)
@@ -512,9 +516,7 @@ class MapBuilderEstimateNet(MapBuilderBase):
         )
         model.load_state_dict(model_data["state_dict"])
 
-        pred_values = self._run_inference_on_points(
-            model, elevation, transform, strength_lo, strength_hi, lats, lons
-        )
+        pred_values = self._run_inference_on_points(model, elevation, transform, strength_lo, strength_hi, lats, lons)
         errors = np.abs(pred_values - true_values)
 
         return MapEvaluateResult(

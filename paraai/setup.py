@@ -8,6 +8,8 @@ from paraai.repository.repository_models import RepositoryModels
 from paraai.repository.repository_simple_climb import RepositorySimpleClimb
 from paraai.repository.repository_simple_climb_pixel import RepositorySimpleClimbPixel
 from paraai.repository.repository_terrain import RepositoryTerrain
+from paraai.repository.repository_tracklog_body import RepositoryTracklogBody
+from paraai.repository.repository_tracklog_header import RepositoryTracklogHeader
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,8 @@ def setup_database():
     path_models = Path("data", "database_models")
     RepositorySimpleClimb.initialize_sqlite(path_sqlite)
     RepositorySimpleClimbPixel.initialize_sqlite(path_sqlite)
+    RepositoryTracklogBody.initialize_sqlite(path_sqlite)
+    RepositoryTracklogHeader.initialize_sqlite(path_sqlite)
     RepositoryCache.initialize(path_cache)
     RepositoryTerrain.initialize(path_terrain)
     RepositoryMaps.initialize(path_maps)

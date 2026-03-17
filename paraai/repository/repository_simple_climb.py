@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 import json
 import logging
@@ -164,8 +163,8 @@ class RepositorySimpleClimb:
         if len(climbs) < 1:
             raise ValueError("No SimpleClimbs in region")
         return pd.DataFrame(
-            [(c.ground_lat, c.ground_lon, c.climb_strength_m_s) for c in climbs],
-            columns=["lat", "lon", "strength"],
+            [(c.ground_lat, c.ground_lon, c.climb_strength_m_s, c.time_of_day_h, c.time_of_year_d) for c in climbs],
+            columns=["lat", "lon", "strength", "time_of_day_h", "time_of_year_d"],
         )
 
     def _query_cache_key(self, query: dict) -> str:

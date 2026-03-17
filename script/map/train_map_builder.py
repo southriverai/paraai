@@ -74,29 +74,41 @@ class MapDataset(Dataset):
         return self.input_maps[idx], self.target_maps[idx]
 
 
-def run_dataset_mode(args: argparse.Namespace) -> None:
+def run_dataset_mode(
+    region: str,
+    test_frac: float,
+    split_seed: int,
+    builder: MapBuilderEstimateNet,
+) -> None:
     """Build dataset from region and save to RepositoryDatasets cache."""
-    bounding_box = get_bounding_box(args.region)
-    builder = MapBuilderEstimateNet(
-        patch_size_m=args.patch_size_m,
-        image_size=args.image_size,
-        grid_stride=args.grid_stride,
+    bounding_box = get_bounding_box(region)
+    data = builder.get_or_build_dataset(
+        bounding_box,
+        test_frac=test_frac,
+        split_seed=split_seed,
+        ignore_cache=True,
     )
-    data = builder.get_or_build_dataset(bounding_box, args.test_frac, args.split_seed, ignore_cache=True)
     n_train = len(data["input_maps_train"])
     n_test = len(data["input_maps_test"])
     logger.info("Dataset (%s train, %s test patches) built and cached in RepositoryDatasets", n_train, n_test)
 
 
-def run_train_mode(args: argparse.Namespace) -> None:
+def run_train_mode(
+    region: str,
+    test_frac: float,
+    split_seed: int,
+    batch_size: int,
+    lr: float,
+    epochs: int,
+    builder: MapBuilderEstimateNet,
+) -> None:
     """Load dataset from RepositoryDatasets (or build from region if missing), train model, save model."""
-    bounding_box = get_bounding_box(args.region)
-    builder = MapBuilderEstimateNet(
-        patch_size_m=args.patch_size_m,
-        image_size=args.image_size,
-        grid_stride=args.grid_stride,
+    bounding_box = get_bounding_box(region)
+    data = builder.get_or_build_dataset(
+        bounding_box,
+        test_frac=test_frac,
+        split_seed=split_seed,
     )
-    data = builder.get_or_build_dataset(bounding_box, args.test_frac, args.split_seed)
 
     input_maps_train = data["input_maps_train"]
     target_maps_train = data["target_maps_train"]
@@ -113,11 +125,11 @@ def run_train_mode(args: argparse.Namespace) -> None:
 
     train_ds = MapDataset(input_maps_train, target_maps=target_maps_train)
     test_ds = MapDataset(input_maps_test, target_maps=target_maps_test)
-    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
+    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+    test_loader = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
     model = MapEstimateNet(in_channels=in_c, out_channels=out_c, size=image_size).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
     best_test_loss = float("inf")
@@ -125,7 +137,7 @@ def run_train_mode(args: argparse.Namespace) -> None:
 
     from tqdm import tqdm
 
-    pbar = tqdm(range(args.epochs), desc="Training", unit="epoch")
+    pbar = tqdm(range(epochs), desc="Training", unit="epoch")
     for _ in pbar:
         model.train()
         train_loss = 0.0
@@ -181,18 +193,22 @@ def run_train_mode(args: argparse.Namespace) -> None:
     logger.info("Saved model to RepositoryModels")
 
 
-def run_show_patch_mode(args: argparse.Namespace) -> None:
+def run_show_patch_mode(
+    region: str,
+    test_frac: float,
+    split_seed: int,
+    builder: MapBuilderEstimateNet,
+) -> None:
     """Show elevation map with patch locations, and two random patches in separate charts."""
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
 
-    bounding_box = get_bounding_box(args.region)
-    builder = MapBuilderEstimateNet(
-        patch_size_m=args.patch_size_m,
-        image_size=args.image_size,
-        grid_stride=args.grid_stride,
+    bounding_box = get_bounding_box(region)
+    data = builder.get_or_build_dataset(
+        bounding_box,
+        test_frac=test_frac,
+        split_seed=split_seed,
     )
-    data = builder.get_or_build_dataset(bounding_box, args.test_frac, args.split_seed)
 
     input_maps_train = data["input_maps_train"]
     target_maps_train = data["target_maps_train"]
@@ -205,7 +221,7 @@ def run_show_patch_mode(args: argparse.Namespace) -> None:
     if n < 2:
         raise ValueError(f"Need at least 2 training patches, got {n}")
 
-    rng = np.random.default_rng(args.split_seed)
+    rng = np.random.default_rng(split_seed)
     indices = rng.choice(n, size=2, replace=False)
 
     # Load elevation for the full map
@@ -260,47 +276,38 @@ def run_show_patch_mode(args: argparse.Namespace) -> None:
     plt.show()
 
 
-def run_estimate_mode(args: argparse.Namespace) -> None:
+def run_estimate_mode(region: str, builder: MapBuilderEstimateNet) -> None:
     """Load trained model from RepositoryModels, run inference on region, cache strength map."""
     from paraai.repository.repository_models import RepositoryModels
 
-    bounding_box = get_bounding_box(args.region)
-    builder = MapBuilderEstimateNet(
-        patch_size_m=args.patch_size_m,
-        image_size=args.image_size,
-        grid_stride=args.grid_stride,
-    )
+    bounding_box = get_bounding_box(region)
     repo_models = RepositoryModels.get_instance()
     model_data = repo_models.get_model(builder.name, **builder.get_model_cache_params())
     if model_data is None:
-        raise FileNotFoundError(
-            f"Model not found in RepositoryModels for {builder.name}. Run train mode first."
-        )
+        raise FileNotFoundError(f"Model not found in RepositoryModels for {builder.name}. Run train mode first.")
 
     climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
     builder.build(bounding_box, climb_df, ignore_cache=True)
     logger.info("Built and cached strength map")
 
 
-def run_eval_mode(args: argparse.Namespace) -> None:
+def run_eval_mode(
+    region: str,
+    test_frac: float,
+    split_seed: int,
+    builder: MapBuilderEstimateNet,
+) -> None:
     """Evaluate MapBuilderEstimateNet on holdout data (like eval_map_builder.py)."""
     from paraai.repository.repository_models import RepositoryModels
 
-    bounding_box = get_bounding_box(args.region)
-    builder = MapBuilderEstimateNet(
-        patch_size_m=args.patch_size_m,
-        image_size=args.image_size,
-        grid_stride=args.grid_stride,
-    )
+    bounding_box = get_bounding_box(region)
     repo_models = RepositoryModels.get_instance()
     model_data = repo_models.get_model(builder.name, **builder.get_model_cache_params())
     if model_data is None:
-        raise FileNotFoundError(
-            f"Model not found in RepositoryModels for {builder.name}. Run train mode first."
-        )
+        raise FileNotFoundError(f"Model not found in RepositoryModels for {builder.name}. Run train mode first.")
 
     climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
-    train_df, holdout_df = split_dataframe(climb_df, args.test_frac, args.split_seed)
+    train_df, holdout_df = split_dataframe(climb_df, test_frac, split_seed)
     maps = builder.build(bounding_box, train_df, ignore_cache=True)
     vma = maps["strength"]
 
@@ -320,7 +327,7 @@ def run_eval_mode(args: argparse.Namespace) -> None:
         vma,
         holdout_df,
         column_name="strength",
-        title=f"MapBuilderEstimateNet: {args.region}",
+        title=f"MapBuilderEstimateNet: {region}",
         elevation=elevation,
     )
 
@@ -351,24 +358,26 @@ def parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    # Usage (dataset path derived from MapBuilderEstimateNet + region via RepositoryDatasets):
-    #   python script/map/train_map_builder.py --region sopot --mode show_patch
-    #   python script/map/train_map_builder.py --region sopot --mode dataset
-    #   python script/map/train_map_builder.py --region sopot --mode train --epochs 10
-    #   python script/map/train_map_builder.py --region sopot --mode estimate
-    #   python script/map/train_map_builder.py --region sopot --mode eval
-    #   python script/map/train_map_builder.py --region sopot  # default: --mode estimate
     args = parse_args()
+    logging.basicConfig(level=getattr(logging, args.log_level))
     setup()
+    region = args.region
+    test_frac = args.test_frac
+    split_seed = args.split_seed
+    builder = MapBuilderEstimateNet(
+        patch_size_m=args.patch_size_m,
+        image_size=args.image_size,
+        grid_stride=args.grid_stride,
+    )
     if args.mode == "show_patch":
-        run_show_patch_mode(args)
+        run_show_patch_mode(region, test_frac, split_seed, builder)
     elif args.mode == "dataset":
-        run_dataset_mode(args)
+        run_dataset_mode(region, test_frac, split_seed, builder)
     elif args.mode == "train":
-        run_train_mode(args)
+        run_train_mode(region, test_frac, split_seed, args.batch_size, args.lr, args.epochs, builder)
     elif args.mode == "estimate":
-        run_estimate_mode(args)
+        run_estimate_mode(region, builder)
     elif args.mode == "eval":
-        run_eval_mode(args)
+        run_eval_mode(region, test_frac, split_seed, builder)
     else:
         raise ValueError(f"Unknown mode: {args.mode}")

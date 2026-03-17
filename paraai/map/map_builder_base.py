@@ -24,6 +24,8 @@ class MapEvaluateResult:
     strength_rmse: float
     n_train: int
     n_holdout: int
+    true_values: np.ndarray | None = None
+    pred_values: np.ndarray | None = None
 
     def __str__(self) -> str:
         result += f"Strength MAE: {self.strength_mae:.4f}\n"
@@ -158,4 +160,6 @@ class MapBuilderBase:
             strength_rmse=float(np.sqrt(np.mean([e**2 for e in errors]))),
             n_train=n_train,
             n_holdout=len(evaluate_df),
+            true_values=true_values,
+            pred_values=pred_values,
         )

@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 from paraai.repository.repository_tracklog_body import RepositoryTracklogBody
 from paraai.repository.repository_tracklog_header import RepositoryTracklogHeader
+from paraai.setup import setup
 from paraai.tools_tracklogbody import _get_regions_with_indices, clean_tracklog
 
 # Minimum progress length by definition (MIN_PROGRESS_RATE 300 m/min * MIN_PROGRESS_DURATION 60 s)
@@ -77,6 +78,10 @@ async def main() -> None:
     repo_body = RepositoryTracklogBody.get_instance()
     repo_header = RepositoryTracklogHeader.get_instance()
     tracklogs = await repo_body.asample(2000)
+    if len(tracklogs) == 0:
+        raise ValueError("No tracklogs found")
+    if len(tracklogs) < 2000:
+        raise ValueError(f"Only {len(tracklogs)} tracklogs found, expected at least 2000")
 
     mean_progress_lengths: list[float] = []
     all_progress_lengths: list[float] = []
@@ -251,7 +256,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    path_db = Path("data", "database_sqlite")
-    RepositoryTracklogBody.initialize_sqlite(path_db)
-    RepositoryTracklogHeader.initialize_sqlite(path_db)
+    setup()
     asyncio.run(main())

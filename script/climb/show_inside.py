@@ -6,6 +6,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.optimize import curve_fit
 from tqdm import tqdm
 
 from paraai.model.climb import Climb
@@ -235,6 +236,28 @@ async def main(ignore_cache: bool = False):
     fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=True)
     axes[0, 0].bar(x, bin_values_climb, width=width, color="steelblue", alpha=0.8)
     axes[0, 0].axhline(1.0, color="gray", linestyle="--", alpha=0.5)
+
+    def _catenary_model(x_arr: np.ndarray, a: float, b: float, x0: float) -> np.ndarray:
+        return b - a * np.cosh((x_arr - x0) / a)
+
+    mask = np.isfinite(bin_values_climb)
+    if np.sum(mask) >= 4:
+        try:
+            (a_fit, b_fit, x0_fit), _ = curve_fit(
+                _catenary_model,
+                x[mask],
+                bin_values_climb[mask],
+                p0=(0.3, 1.2, 0.5),
+                bounds=([0.01, -10, 0], [10, 10, 1]),
+            )
+            x_fit = np.linspace(x.min(), x.max(), 100)
+            axes[0, 0].plot(x_fit, _catenary_model(x_fit, a_fit, b_fit, x0_fit), "r-", linewidth=2, label=f"y = {b_fit:.3f} - {a_fit:.3f}·cosh((x-{x0_fit:.3f})/{a_fit:.3f})")
+            axes[0, 0].legend()
+            print("\nPer-climb velocity fit: y = b - a·cosh((x-x0)/a)")
+            print(f"  a = {a_fit:.4f}, b = {b_fit:.4f}, x0 = {x0_fit:.4f}")
+        except Exception:
+            pass
+
     axes[0, 0].set_ylabel("Relative velocity")
     axes[0, 0].set_title("Per-climb: velocity")
     axes[0, 0].grid(True, alpha=0.3, axis="y")
