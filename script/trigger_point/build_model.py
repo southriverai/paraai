@@ -16,7 +16,7 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset
 
-from paraai.map.map_estimate_net import MapEstimateNet
+from paraai.map.map_estimate_net import MapEstimateNetSimpleSimple
 from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_trigger_point import RepositoryTriggerPoint
 from paraai.tool_spacetime import haversine_km_tuple
@@ -105,7 +105,7 @@ def train_model(
     lr: float = 1e-3,
     batch_size: int = 8,
     device: str | None = None,
-) -> MapEstimateNet:
+) -> MapEstimateNetSimple:
     """
     Train a CNN to estimate the example map from input maps.
 
@@ -132,7 +132,7 @@ def train_model(
     in_c = input_maps[0].shape[0]
     out_c = example_map.shape[0]
     h, w = example_map.shape[1], example_map.shape[2]
-    model = MapEstimateNet(in_channels=in_c, out_channels=out_c, size=max(h, w)).to(device)
+    model = MapEstimateNetSimple(in_channels=in_c, out_channels=out_c, size=max(h, w)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
@@ -311,7 +311,7 @@ def build_model(
     test_frac: float = 0.2,
     split_seed: int = 42,
     return_model: str = "lowest_test",
-) -> tuple[MapEstimateNet, float, list[int]]:
+) -> tuple[MapEstimateNetSimple, float, list[int]]:
     """
     Train a CNN to estimate target map from elevation patches.
 
@@ -344,7 +344,7 @@ def build_model(
     in_c = input_maps[0].shape[0]
     out_c = target_maps[0].shape[0]
     image_size = input_maps[0].shape[1]
-    model = MapEstimateNet(in_channels=in_c, out_channels=out_c, size=image_size)
+    model = MapEstimateNetSimple(in_channels=in_c, out_channels=out_c, size=image_size)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Training on %s", device)
     model = model.to(device)
@@ -422,7 +422,7 @@ def build_model(
 
 
 def visualize_region_and_prediction(
-    model: MapEstimateNet,
+    model: MapEstimateNetSimple,
     viz_data: dict,
     device: torch.device,
     *,

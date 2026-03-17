@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from abc import abstractmethod
 from dataclasses import dataclass
@@ -22,15 +24,13 @@ class MapEvaluateResult:
 
     strength_mae: float
     strength_rmse: float
-    n_train: int
     n_holdout: int
     true_values: np.ndarray | None = None
     pred_values: np.ndarray | None = None
 
     def __str__(self) -> str:
-        result += f"Strength MAE: {self.strength_mae:.4f}\n"
+        result = f"Strength MAE: {self.strength_mae:.4f}\n"
         result += f"Strength RMSE: {self.strength_rmse:.4f}\n"
-        result += f"N train: {self.n_train}\n"
         result += f"N holdout: {self.n_holdout}\n"
         return result
 
@@ -47,8 +47,14 @@ class MapBuilderBase:
         self.output_map_names = output_map_names
 
     def get_cache_params(self) -> dict:
-        """Params for cache key. Override in subclasses (e.g. kernel_size_m)."""
+        """Parameters that affect cache identity. Override in subclasses."""
         return {}
+
+    def get_builder_id(self) -> str:
+        """Builder identity string for cache keying. Override for custom logic."""
+        params = self.get_cache_params()
+        s = json.dumps(params, sort_keys=True, default=str)
+        return hashlib.sha256(s.encode()).hexdigest()[:16]
 
     def build(
         self,
@@ -64,7 +70,7 @@ class MapBuilderBase:
                 logger.info("Loaded %s maps from cache", self.name)
                 return maps
         maps = self._build_impl(bounding_box, df)
-        self.save_maps(maps, bounding_box, **self.get_cache_params())
+        self.save_maps(maps, bounding_box)
         return maps
 
     def _try_load_from_cache(self, bounding_box: BoundingBox) -> dict[str, VectorMapArray] | None:
@@ -72,14 +78,13 @@ class MapBuilderBase:
         from paraai.repository.repository_maps import RepositoryMaps
 
         repo = RepositoryMaps.get_instance()
-        params = self.get_cache_params()
         maps: dict[str, VectorMapArray] = {}
         for name in self.output_map_names:
             vma = repo.get_map(
                 self.name,
                 name,
                 bounding_box,
-                **params,
+                builder_id=self.get_builder_id(),
             )
             if vma is None:
                 return None
@@ -99,50 +104,34 @@ class MapBuilderBase:
         self,
         vma: VectorMapArray,
         bounding_box: BoundingBox,
-        *,
-        file_path: str | Path | None = None,
-        use_cache: bool = True,
-        **builder_params: object,
     ) -> Path:
-        """Save map to file or cache. If use_cache, saves via RepositoryMaps. Returns path."""
-        if use_cache:
-            from paraai.repository.repository_maps import RepositoryMaps
+        """Save map to cache via RepositoryMaps. Returns path."""
+        from paraai.repository.repository_maps import RepositoryMaps
 
-            repo = RepositoryMaps.get_instance()
-            path = repo.save_map(
-                vma,
-                generator_name=self.name,
-                map_name=vma.map_name,
-                bounding_box=bounding_box,
-                **builder_params,
-            )
-            logger.info("Cached map %s/%s to %s", self.name, vma.map_name, path)
-            return path
-        if file_path is None:
-            raise ValueError("file_path required when use_cache=False")
-        import rasterio
-
-        with rasterio.open(str(file_path), "w", **vma.profile) as dst:
-            dst.write(vma.array, 1)
-        return Path(file_path)
+        repo = RepositoryMaps.get_instance()
+        path = repo.save_map(
+            vma,
+            generator_name=self.name,
+            map_name=vma.map_name,
+            bounding_box=bounding_box,
+            builder_id=self.get_builder_id(),
+        )
+        logger.info("Cached map %s/%s to %s", self.name, vma.map_name, path)
+        return path
 
     def save_maps(
         self,
         maps: dict[str, VectorMapArray],
         bounding_box: BoundingBox,
-        *,
-        use_cache: bool = True,
-        **builder_params: object,
     ) -> dict[str, Path]:
         """Save multiple maps to cache. Returns dict of map_name -> path."""
-        return {name: self.save_map(vma, bounding_box, use_cache=use_cache, **builder_params) for name, vma in maps.items()}
+        return {name: self.save_map(vma, bounding_box) for name, vma in maps.items()}
 
     def evaluate(
         self,
         vector_map: VectorMapArray,
         evaluate_df: pd.DataFrame,
         column_name: str,
-        n_train: int,
     ) -> MapEvaluateResult:
         """Evaluate estimated climb maps on held-out points. DataFrame must have lat and lon columns."""
         if len(evaluate_df) == 0:
@@ -158,7 +147,6 @@ class MapBuilderBase:
         return MapEvaluateResult(
             strength_mae=float(np.mean(errors)),
             strength_rmse=float(np.sqrt(np.mean([e**2 for e in errors]))),
-            n_train=n_train,
             n_holdout=len(evaluate_df),
             true_values=true_values,
             pred_values=pred_values,

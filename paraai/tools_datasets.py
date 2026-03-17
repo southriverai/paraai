@@ -43,10 +43,12 @@ def save_dataset(
     cache_dir: Path,
     builder_name: str,
     bounding_box: BoundingBox,
+    *,
+    dataset_cache_id: str | None = None,
     **params: object,
 ) -> Path:
     """Save dataset dict to cache. Returns path to saved file."""
-    h = _dataset_cache_hash(builder_name, bounding_box, params)
+    h = dataset_cache_id if dataset_cache_id is not None else _dataset_cache_hash(builder_name, bounding_box, params)
     cache_dir = Path(cache_dir)
     safe_builder = str(builder_name).replace(" ", "_").replace(":", "_")
     path = cache_dir / safe_builder / f"{h}.pt"
@@ -60,10 +62,12 @@ def load_dataset(
     cache_dir: Path,
     builder_name: str,
     bounding_box: BoundingBox,
+    *,
+    dataset_cache_id: str | None = None,
     **params: object,
 ) -> dict | None:
     """Load dataset from cache if exists. Returns None if not cached."""
-    h = _dataset_cache_hash(builder_name, bounding_box, params)
+    h = dataset_cache_id if dataset_cache_id is not None else _dataset_cache_hash(builder_name, bounding_box, params)
     cache_dir = Path(cache_dir)
     safe_builder = str(builder_name).replace(" ", "_").replace(":", "_")
     path = cache_dir / safe_builder / f"{h}.pt"

@@ -4,7 +4,9 @@ Modes:
   dataset    - Build (elevation patches, target maps) from region and save to RepositoryDatasets.
   train      - Load dataset from RepositoryDatasets (by builder + region + params), train the CNN, save model.
   estimate   - Load trained model, run inference on region, produce strength map (no evaluation).
-  eval       - Evaluate on holdout data, print MAE/RMSE, show chart (like eval_map_builder.py).
+  eval       - Evaluate on holdout data, print MAE/RMSE to console (requires trained model).
+  train_eval - Train model, then evaluate on holdout (inference on test patches only, no map building).
+  eval_show  - Evaluate on holdout data, print scores and show map chart.
   show_patch - Show two random elevation patches from the training set.
 
 Usage examples:
@@ -18,10 +20,16 @@ Usage examples:
   # 3. Estimate strength map (default mode, cached by MapBuilderBase)
   python script/map/train_map_builder.py --region sopot
 
-  # 4. Evaluate on holdout data
+  # 4. Evaluate on holdout data (print scores only)
   python script/map/train_map_builder.py --mode eval --region sopot
 
-  # Show two random elevation patches from the training set
+  # 5. Train then evaluate (no pre-trained model needed)
+  python script/map/train_map_builder.py --mode train_eval --region sopot --builder-type time
+
+  # 6. Evaluate and show map chart
+  python script/map/train_map_builder.py --mode eval_show --region sopot
+
+  # 7. Show two random elevation patches from the training set
   python script/map/train_map_builder.py --mode show_patch --region sopot
 """
 
@@ -30,6 +38,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import time
 
 import numpy as np
 import rasterio
@@ -37,8 +46,8 @@ import torch
 from torch import nn
 from torch.utils.data import Dataset
 
-from paraai.map.map_builder_estimate_net import MapBuilderEstimateNet
-from paraai.map.map_estimate_net import MapEstimateNet
+from paraai.map.map_builder_estimate_simple import MapBuilderEstimateSimple
+from paraai.map.map_builder_estimate_time import MapBuilderEstimateTime
 from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_simple_climb import RepositorySimpleClimb
 from paraai.repository.repository_terrain import RepositoryTerrain
@@ -74,23 +83,56 @@ class MapDataset(Dataset):
         return self.input_maps[idx], self.target_maps[idx]
 
 
+class MapDatasetTime(Dataset):
+    """Dataset for time model: (elevation_patch, time_of_day, time_of_year, target_scalar)."""
+
+    def __init__(
+        self,
+        input_maps: list[torch.Tensor],
+        time_of_day: list[float],
+        time_of_year: list[float],
+        target_maps: list[torch.Tensor],
+    ) -> None:
+        self.input_maps = input_maps
+        self.time_of_day = time_of_day
+        self.time_of_year = time_of_year
+        self.target_maps = target_maps
+        assert len(self.input_maps) == len(self.target_maps) == len(time_of_day) == len(time_of_year)
+
+    def __len__(self) -> int:
+        return len(self.input_maps)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            self.input_maps[idx],
+            torch.tensor(self.time_of_day[idx], dtype=torch.float32),
+            torch.tensor(self.time_of_year[idx], dtype=torch.float32),
+            self.target_maps[idx],
+        )
+
+
 def run_dataset_mode(
     region: str,
     test_frac: float,
     split_seed: int,
-    builder: MapBuilderEstimateNet,
+    builder: MapBuilderEstimateSimple | MapBuilderEstimateTime,
 ) -> None:
     """Build dataset from region and save to RepositoryDatasets cache."""
     bounding_box = get_bounding_box(region)
+    climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
+    train_df, test_df = split_dataframe(climb_df, test_frac, split_seed)
     data = builder.get_or_build_dataset(
         bounding_box,
-        test_frac=test_frac,
-        split_seed=split_seed,
+        train_df,
+        test_df,
         ignore_cache=True,
     )
+
     n_train = len(data["input_maps_train"])
     n_test = len(data["input_maps_test"])
     logger.info("Dataset (%s train, %s test patches) built and cached in RepositoryDatasets", n_train, n_test)
+    print("\nDataset head (train):")
+    print(train_df.head(5))
 
 
 def run_train_mode(
@@ -100,14 +142,16 @@ def run_train_mode(
     batch_size: int,
     lr: float,
     epochs: int,
-    builder: MapBuilderEstimateNet,
+    builder: MapBuilderEstimateSimple | MapBuilderEstimateTime,
 ) -> None:
     """Load dataset from RepositoryDatasets (or build from region if missing), train model, save model."""
     bounding_box = get_bounding_box(region)
+    climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
+    train_df, test_df = split_dataframe(climb_df, test_frac, split_seed)
     data = builder.get_or_build_dataset(
         bounding_box,
-        test_frac=test_frac,
-        split_seed=split_seed,
+        train_df,
+        test_df,
     )
 
     input_maps_train = data["input_maps_train"]
@@ -116,6 +160,9 @@ def run_train_mode(
     target_maps_test = data["target_maps_test"]
     meta = data["metadata"]
 
+    print("\nDataset head (train):")
+    print(train_df.head(5))
+
     in_c = input_maps_train[0].shape[0]
     out_c = target_maps_train[0].shape[0]
     image_size = meta["image_size"]
@@ -123,32 +170,52 @@ def run_train_mode(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Training on %s", device)
 
-    train_ds = MapDataset(input_maps_train, target_maps=target_maps_train)
-    test_ds = MapDataset(input_maps_test, target_maps=target_maps_test)
+    is_time_builder = isinstance(builder, MapBuilderEstimateTime)
+    if is_time_builder:
+        time_day_train = data["time_of_day_train"]
+        time_year_train = data["time_of_year_train"]
+        time_day_test = data["time_of_day_test"]
+        time_year_test = data["time_of_year_test"]
+        train_ds = MapDatasetTime(input_maps_train, time_day_train, time_year_train, target_maps_train)
+        test_ds = MapDatasetTime(input_maps_test, time_day_test, time_year_test, target_maps_test)
+
+    else:
+        train_ds = MapDataset(input_maps_train, target_maps=target_maps_train)
+        test_ds = MapDataset(input_maps_test, target_maps=target_maps_test)
     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     test_loader = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=False)
-
-    model = MapEstimateNet(in_channels=in_c, out_channels=out_c, size=image_size).to(device)
+    model = builder._get_model_class()(in_channels=in_c, out_channels=out_c, size=image_size).to(device)
+    # print model architecture
+    logger.info("Model class: %s", builder._get_model_class())
+    logger.info("Model architecture: %s", model)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()
+    # criterion = nn.MSELoss()
+    criterion = nn.L1Loss()
 
     best_test_loss = float("inf")
     best_state: dict | None = None
 
-    from tqdm import tqdm
-
-    pbar = tqdm(range(epochs), desc="Training", unit="epoch")
-    for _ in pbar:
+    t_start = time.perf_counter()
+    for epoch in range(epochs):
         model.train()
         train_loss = 0.0
         n_b = 0
-        for inp, tgt in train_loader:
-            inp_dev, tgt_dev = inp.to(device), tgt.to(device)
-            optimizer.zero_grad()
-            pred = model(inp_dev)
-            if pred.shape[2:] != tgt_dev.shape[2:]:
-                pred = nn.functional.interpolate(pred, size=tgt_dev.shape[2:], mode="bilinear")
+        for batch in train_loader:
+            if is_time_builder:
+                inp, td, ty, tgt = batch
+                inp_dev = inp.to(device)
+                td_dev = td.to(device)
+                ty_dev = ty.to(device)
+                tgt_dev = tgt.to(device)
+                pred = model(inp_dev, td_dev, ty_dev)
+            else:
+                inp, tgt = batch
+                inp_dev, tgt_dev = inp.to(device), tgt.to(device)
+                pred = model(inp_dev)
+                if pred.shape[2:] != tgt_dev.shape[2:]:
+                    pred = nn.functional.interpolate(pred, size=tgt_dev.shape[2:], mode="bilinear")
             loss = criterion(pred, tgt_dev)
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
@@ -159,11 +226,20 @@ def run_train_mode(
         test_loss = 0.0
         n_b = 0
         with torch.no_grad():
-            for inp, tgt in test_loader:
-                inp_dev, tgt_dev = inp.to(device), tgt.to(device)
-                pred = model(inp_dev)
-                if pred.shape[2:] != tgt_dev.shape[2:]:
-                    pred = nn.functional.interpolate(pred, size=tgt_dev.shape[2:], mode="bilinear")
+            for batch in test_loader:
+                if is_time_builder:
+                    inp, td, ty, tgt = batch
+                    inp_dev = inp.to(device)
+                    td_dev = td.to(device)
+                    ty_dev = ty.to(device)
+                    tgt_dev = tgt.to(device)
+                    pred = model(inp_dev, td_dev, ty_dev)
+                else:
+                    inp, tgt = batch
+                    inp_dev, tgt_dev = inp.to(device), tgt.to(device)
+                    pred = model(inp_dev)
+                    if pred.shape[2:] != tgt_dev.shape[2:]:
+                        pred = nn.functional.interpolate(pred, size=tgt_dev.shape[2:], mode="bilinear")
                 test_loss += criterion(pred, tgt_dev).item()
                 n_b += 1
         test_loss /= n_b if n_b else 1
@@ -171,7 +247,19 @@ def run_train_mode(
         if test_loss < best_test_loss:
             best_test_loss = test_loss
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-        pbar.set_postfix(train_loss=f"{train_loss:.4f}", test_loss=f"{test_loss:.4f}")
+
+        elapsed = time.perf_counter() - t_start
+        eta_sec = (elapsed / (epoch + 1)) * (epochs - epoch - 1) if epoch < epochs - 1 else 0
+        eta_str = f", ETA {eta_sec:.0f}s" if eta_sec > 0 else ""
+        logger.info(
+            "Epoch %d/%d: train_loss=%.4f test_loss=%.4f (%.1fs)%s",
+            epoch + 1,
+            epochs,
+            train_loss,
+            test_loss,
+            elapsed,
+            eta_str,
+        )
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -197,15 +285,19 @@ def run_show_patch_mode(
     region: str,
     test_frac: float,
     split_seed: int,
-    builder: MapBuilderEstimateNet,
+    builder: MapBuilderEstimateSimple | MapBuilderEstimateTime,
 ) -> None:
     """Show elevation map with patch locations, and two random patches in separate charts."""
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
 
     bounding_box = get_bounding_box(region)
+    climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
+    train_df, test_df = split_dataframe(climb_df, test_frac, split_seed)
     data = builder.get_or_build_dataset(
         bounding_box,
+        train_df,
+        test_df,
         test_frac=test_frac,
         split_seed=split_seed,
     )
@@ -266,7 +358,7 @@ def run_show_patch_mode(
         ax = fig.add_subplot(gs[i, 1])
         patch = input_maps_train[idx]  # (1, H, W)
         target = target_maps_train[idx]
-        strength_val = target[0, 0, 0].item()
+        strength_val = target[0].item() if target.dim() == 1 else target[0, 0, 0].item()
         img = patch[0].numpy()
         ax.imshow(img, cmap="terrain", vmin=0, vmax=1)
         ax.set_title(f"Patch {idx + 1} (strength={strength_val:.3f})")
@@ -276,7 +368,7 @@ def run_show_patch_mode(
     plt.show()
 
 
-def run_estimate_mode(region: str, builder: MapBuilderEstimateNet) -> None:
+def run_estimate_mode(region: str, builder: MapBuilderEstimateSimple | MapBuilderEstimateTime) -> None:
     """Load trained model from RepositoryModels, run inference on region, cache strength map."""
     from paraai.repository.repository_models import RepositoryModels
 
@@ -291,13 +383,38 @@ def run_estimate_mode(region: str, builder: MapBuilderEstimateNet) -> None:
     logger.info("Built and cached strength map")
 
 
+def run_train_eval_mode(
+    region: str,
+    test_frac: float,
+    split_seed: int,
+    batch_size: int,
+    lr: float,
+    epochs: int,
+    builder: MapBuilderEstimateSimple | MapBuilderEstimateTime,
+) -> None:
+    """Train model, then evaluate on holdout. No map building - inference on test patches only."""
+    run_train_mode(region, test_frac, split_seed, batch_size, lr, epochs, builder)
+    bounding_box = get_bounding_box(region)
+    climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
+    train_df, holdout_df = split_dataframe(climb_df, test_frac, split_seed)
+    eval_result = builder.evaluate(
+        bounding_box=bounding_box,
+        evaluate_df=holdout_df,
+    )
+    print("\n" + "=" * 60)
+    print(f"Map evaluation (n_train={len(train_df)}, n_holdout={len(holdout_df)})")
+    print("=" * 60)
+    print(f"strength_mae={eval_result.strength_mae:.4f} m/s, strength_rmse={eval_result.strength_rmse:.4f} m/s")
+    print("=" * 60 + "\n")
+
+
 def run_eval_mode(
     region: str,
     test_frac: float,
     split_seed: int,
-    builder: MapBuilderEstimateNet,
+    builder: MapBuilderEstimateSimple | MapBuilderEstimateTime,
 ) -> None:
-    """Evaluate MapBuilderEstimateNet on holdout data (like eval_map_builder.py)."""
+    """Evaluate on holdout data, print MAE/RMSE to console (requires trained model)."""
     from paraai.repository.repository_models import RepositoryModels
 
     bounding_box = get_bounding_box(region)
@@ -311,7 +428,35 @@ def run_eval_mode(
     maps = builder.build(bounding_box, train_df, ignore_cache=True)
     vma = maps["strength"]
 
-    eval_result = builder.evaluate(vma, holdout_df, column_name="strength", n_train=len(train_df))
+    eval_result = builder.evaluate(vma, holdout_df, column_name="strength")
+    print("\n" + "=" * 60)
+    print(f"Map evaluation (n_train={len(train_df)}, n_holdout={len(holdout_df)})")
+    print("=" * 60)
+    print(f"strength_mae={eval_result.strength_mae:.4f} m/s, strength_rmse={eval_result.strength_rmse:.4f} m/s")
+    print("=" * 60 + "\n")
+
+
+def run_eval_show_mode(
+    region: str,
+    test_frac: float,
+    split_seed: int,
+    builder: MapBuilderEstimateSimple | MapBuilderEstimateTime,
+) -> None:
+    """Evaluate MapBuilderEstimateNet on holdout data, print scores and show map chart."""
+    from paraai.repository.repository_models import RepositoryModels
+
+    bounding_box = get_bounding_box(region)
+    repo_models = RepositoryModels.get_instance()
+    model_data = repo_models.get_model(builder.name, **builder.get_model_cache_params())
+    if model_data is None:
+        raise FileNotFoundError(f"Model not found in RepositoryModels for {builder.name}. Run train mode first.")
+
+    climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
+    train_df, holdout_df = split_dataframe(climb_df, test_frac, split_seed)
+    maps = builder.build(bounding_box, train_df, ignore_cache=True)
+    vma = maps["strength"]
+
+    eval_result = builder.evaluate(bounding_box, holdout_df)
     print("\n" + "=" * 60)
     print(f"Map evaluation (n_train={len(train_df)}, n_holdout={len(holdout_df)})")
     print("=" * 60)
@@ -327,7 +472,7 @@ def run_eval_mode(
         vma,
         holdout_df,
         column_name="strength",
-        title=f"MapBuilderEstimateNet: {region}",
+        title=f"MapBuilderEstimate: {region}",
         elevation=elevation,
     )
 
@@ -340,11 +485,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["dataset", "train", "estimate", "eval", "show_patch"],
+        choices=["dataset", "train", "estimate", "eval", "train_eval", "eval_show", "show_patch"],
         default="estimate",
-        help="dataset: build and save dataset; train: load dataset, train, save model; estimate: load model, produce map (default); eval: evaluate on holdout, show chart; show_patch: show two random patches from training set",
+        help="dataset: build and save dataset; train: load dataset, train, save model; estimate: load model, produce map (default); eval: evaluate on holdout (requires trained model); train_eval: train then evaluate on test patches (no map); eval_show: evaluate and show map chart; show_patch: show two random patches from training set",
     )
     parser.add_argument("--region", type=str, default="sopot", help="Region (bassano, sopot, bansko, europe)")
+    parser.add_argument(
+        "--builder-type",
+        choices=["simple", "time"],
+        default="simple",
+        help="Map builder: simple (elevation only) or time (elevation + time_of_day, time_of_year)",
+    )
     parser.add_argument("--patch-size-m", type=float, default=500.0, help="Patch size in meters")
     parser.add_argument("--image-size", type=int, default=64, help="Patch resolution")
     parser.add_argument("--grid-stride", type=int, default=16, help="Stride for sampling grid")
@@ -357,6 +508,28 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def create_builder(
+    builder_type: str,
+    patch_size_m: float,
+    image_size: int,
+    grid_stride: int,
+):
+    """Create map builder from type and common params."""
+    if builder_type == "simple":
+        return MapBuilderEstimateSimple(
+            patch_size_m=patch_size_m,
+            image_size=image_size,
+            grid_stride=grid_stride,
+        )
+    if builder_type == "time":
+        return MapBuilderEstimateTime(
+            patch_size_m=patch_size_m,
+            image_size=image_size,
+            grid_stride=grid_stride,
+        )
+    raise ValueError(f"Unknown builder type: {builder_type}")
+
+
 if __name__ == "__main__":
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level))
@@ -364,10 +537,11 @@ if __name__ == "__main__":
     region = args.region
     test_frac = args.test_frac
     split_seed = args.split_seed
-    builder = MapBuilderEstimateNet(
-        patch_size_m=args.patch_size_m,
-        image_size=args.image_size,
-        grid_stride=args.grid_stride,
+    builder = create_builder(
+        args.builder_type,
+        args.patch_size_m,
+        args.image_size,
+        args.grid_stride,
     )
     if args.mode == "show_patch":
         run_show_patch_mode(region, test_frac, split_seed, builder)
@@ -379,5 +553,9 @@ if __name__ == "__main__":
         run_estimate_mode(region, builder)
     elif args.mode == "eval":
         run_eval_mode(region, test_frac, split_seed, builder)
+    elif args.mode == "train_eval":
+        run_train_eval_mode(region, test_frac, split_seed, args.batch_size, args.lr, args.epochs, builder)
+    elif args.mode == "eval_show":
+        run_eval_show_mode(region, test_frac, split_seed, builder)
     else:
         raise ValueError(f"Unknown mode: {args.mode}")

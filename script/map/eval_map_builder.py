@@ -120,7 +120,6 @@ async def main(region_name: str, bounding_box: BoundingBox) -> None:
             strength_vma,
             holdout_df,
             column_name="strength",
-            n_train=len(train_df),
         )
         results.append((display_name, eval_result, {"count_vma": count_vma, "strength_vma": strength_vma}))
 

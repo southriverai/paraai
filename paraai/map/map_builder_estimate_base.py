@@ -2,29 +2,43 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
+import hashlib
+import json
 import logging
+import time
+from abc import abstractmethod
 
 import numpy as np
 import pandas as pd
 import rasterio
 import torch
 from torch import nn
-from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from paraai.map.map_builder_base import MapBuilderBase, MapEvaluateResult
-from paraai.map.map_estimate_net import MapEstimateNet
+from paraai.map.map_estimate_net import MapEstimateNetSimple
 from paraai.map.vectror_map_array import VectorMapArray
 from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_datasets import RepositoryDatasets
-from paraai.repository.repository_models import RepositoryModels
-from paraai.repository.repository_simple_climb import RepositorySimpleClimb
 from paraai.repository.repository_terrain import RepositoryTerrain
-from paraai.tools_datasets import split_dataframe
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_dataset_cache_hash(
+    builder_name: str,
+    bounding_box: BoundingBox,
+    params: dict,
+) -> str:
+    """Hash for dataset cache key: builder + bbox + params."""
+    data = {
+        "builder": builder_name,
+        "bbox": [bounding_box.lat_min, bounding_box.lat_max, bounding_box.lon_min, bounding_box.lon_max],
+        "params": dict(sorted(params.items())),
+    }
+    s = json.dumps(data, sort_keys=True, default=str)
+    return hashlib.sha256(s.encode()).hexdigest()[:16]
 
 
 def _extract_elevation_patch(
@@ -61,26 +75,7 @@ def _extract_elevation_patch(
     return t
 
 
-class _MapDataset(Dataset):
-    """Dataset of (input_map, target_map) pairs as tensors."""
-
-    def __init__(
-        self,
-        input_maps: list[torch.Tensor],
-        target_maps: list[torch.Tensor],
-    ) -> None:
-        self.input_maps = input_maps
-        self.target_maps = target_maps
-        assert len(self.input_maps) == len(self.target_maps)
-
-    def __len__(self) -> int:
-        return len(self.input_maps)
-
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.input_maps[idx], self.target_maps[idx]
-
-
-class MapBuilderEstimateNet(MapBuilderBase):
+class MapBuilderEstimateBase(MapBuilderBase):
     """
     Map builder that trains a CNN to estimate strength from elevation patches.
 
@@ -89,6 +84,7 @@ class MapBuilderEstimateNet(MapBuilderBase):
 
     def __init__(
         self,
+        name: str,
         patch_size_m: float = 500.0,
         image_size: int = 64,
         grid_stride: int = 16,
@@ -98,7 +94,7 @@ class MapBuilderEstimateNet(MapBuilderBase):
         lr: float = 1e-3,
         return_model: str = "lowest_test",
     ) -> None:
-        super().__init__(name="MapBuilderEstimateNet", output_map_names=["strength"])
+        super().__init__(name=name, output_map_names=["strength"])
         self.patch_size_m = patch_size_m
         self.image_size = image_size
         self.grid_stride = grid_stride
@@ -107,12 +103,23 @@ class MapBuilderEstimateNet(MapBuilderBase):
         self.lr = lr
         self.return_model = return_model
 
-    def get_cache_params(self) -> dict:
-        return {
+    def get_builder_id(self) -> str:
+        """Builder identity string for cache keying."""
+        params = {
             "patch_size_m": self.patch_size_m,
             "image_size": self.image_size,
             "grid_stride": self.grid_stride,
         }
+        s = json.dumps(params, sort_keys=True)
+        return hashlib.sha256(s.encode()).hexdigest()[:16]
+
+    def get_model_id(self) -> dict:
+        """Params for cache key. Uses builder_id for estimate builders."""
+        return {"builder_id": self.get_builder_id()}
+
+    def get_cache_params(self) -> dict:
+        """Params for cache key. Delegates to get_model_id."""
+        return self.get_model_id()
 
     def get_model_cache_params(self) -> dict:
         """Params for model cache key (excludes split params)."""
@@ -122,13 +129,22 @@ class MapBuilderEstimateNet(MapBuilderBase):
             "grid_stride": self.grid_stride,
         }
 
-    def get_dataset_cache_params(self, test_frac: float, split_seed: int) -> dict:
-        """Params for dataset cache key (includes split params)."""
-        return {
-            **self.get_cache_params(),
-            "test_frac": test_frac,
-            "split_seed": split_seed,
+    def _get_model_class(self) -> type[MapEstimateNetSimple]:
+        raise NotImplementedError("Subclasses must implement _get_model_class")
+
+    def get_dataset_cache_id(
+        self,
+        bounding_box: BoundingBox,
+        train_df: pd.DataFrame,
+        test_df: pd.DataFrame,
+    ) -> str:
+        """Compute dataset cache ID hash from builder params and train/test data."""
+        params = {
+            "builder_id": self.get_builder_id(),
+            "train_df": train_df.to_dict(),
+            "test_df": test_df.to_dict(),
         }
+        return _compute_dataset_cache_hash(self.name, bounding_box, params)
 
     def _build_dataset(
         self,
@@ -225,20 +241,12 @@ class MapBuilderEstimateNet(MapBuilderBase):
                 raise ValueError(f"{name} must have columns 'lat' and 'lon'")
             if "strength" not in df.columns:
                 raise ValueError(f"{name} must have column 'strength'")
-            if "time_of_day_h" not in df.columns:
-                raise ValueError(f"{name} must have column 'time_of_day_h'")
-            if "time_of_year_d" not in df.columns:
-                raise ValueError(f"{name} must have column 'time_of_year_d'")
 
-        cache_params = (
-            self.get_dataset_cache_params(test_frac, split_seed)
-            if test_frac is not None and split_seed is not None
-            else self.get_cache_params()
-        )
+        cache_id = self.get_dataset_cache_id(bounding_box, df_training, df_test)
 
         if not ignore_cache:
             repo = RepositoryDatasets.get_instance()
-            data = repo.get_dataset(self.name, bounding_box, **cache_params)
+            data = repo.get_dataset(self.name, bounding_box, dataset_cache_id=cache_id)
             if data is not None:
                 n_train = len(data["input_maps_train"])
                 n_test = len(data["input_maps_test"])
@@ -280,7 +288,7 @@ class MapBuilderEstimateNet(MapBuilderBase):
         }
 
         repo = RepositoryDatasets.get_instance()
-        repo.save_dataset(data, self.name, bounding_box, **cache_params)
+        repo.save_dataset(data, self.name, bounding_box, dataset_cache_id=cache_id)
         logger.info(
             "Cached dataset (%s train, %s test patches) to repository",
             len(input_maps_train),
@@ -291,16 +299,16 @@ class MapBuilderEstimateNet(MapBuilderBase):
     def get_or_build_dataset(
         self,
         bounding_box: BoundingBox,
-        test_frac: float = 0.2,
-        split_seed: int = 42,
+        train_df: pd.DataFrame,
+        test_df: pd.DataFrame,
         *,
         ignore_cache: bool = False,
     ) -> dict:
-        """Load dataset from cache or build from region. Returns dataset dict."""
-        cache_params = self.get_dataset_cache_params(test_frac, split_seed)
+        """Load dataset from cache or build from train_df and test_df. Returns dataset dict."""
+        cache_id = self.get_dataset_cache_id(bounding_box, train_df, test_df)
         if not ignore_cache:
             repo = RepositoryDatasets.get_instance()
-            data = repo.get_dataset(self.name, bounding_box, **cache_params)
+            data = repo.get_dataset(self.name, bounding_box, dataset_cache_id=cache_id)
             if data is not None:
                 n_train = len(data["input_maps_train"])
                 n_test = len(data["input_maps_test"])
@@ -308,10 +316,7 @@ class MapBuilderEstimateNet(MapBuilderBase):
                 return data
 
         logger.info("Dataset not in cache, building from region")
-        climb_df = asyncio.run(RepositorySimpleClimb.get_instance().get_climb_dataframe(bounding_box))
-        train_df, test_df = split_dataframe(climb_df, test_frac, split_seed)
-        logger.info("Split dataset into train/test (%s train, %s test)", len(train_df), len(test_df))
-        return self.build_dataset(bounding_box, train_df, test_df, ignore_cache=True, test_frac=test_frac, split_seed=split_seed)
+        return self.build_dataset(bounding_box, train_df, test_df, ignore_cache=True)
 
     def _train_model(
         self,
@@ -319,11 +324,11 @@ class MapBuilderEstimateNet(MapBuilderBase):
         target_maps_train: list[torch.Tensor],
         input_maps_test: list[torch.Tensor],
         target_maps_test: list[torch.Tensor],
-    ) -> MapEstimateNet:
+    ) -> MapEstimateNetSimple:
         """Train CNN on pre-split train/test data. Returns best model."""
         in_c = input_maps_train[0].shape[0]
         out_c = target_maps_train[0].shape[0]
-        model = MapEstimateNet(in_channels=in_c, out_channels=out_c, size=self.image_size)
+        model = self._get_model_class()(in_channels=in_c, out_channels=out_c, size=self.image_size)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info("Training on %s", device)
         model = model.to(device)
@@ -339,8 +344,8 @@ class MapBuilderEstimateNet(MapBuilderBase):
         best_test_loss = float("inf")
         best_test_state: dict | None = None
 
-        pbar = tqdm(range(self.epochs), desc="Training", unit="epoch")
-        for _epoch in pbar:
+        t_start = time.perf_counter()
+        for epoch in range(self.epochs):
             model.train()
             optimizer.zero_grad()
             pred = model(train_inp)
@@ -362,7 +367,18 @@ class MapBuilderEstimateNet(MapBuilderBase):
                 best_test_loss = test_loss
                 best_test_state = copy.deepcopy(model.state_dict())
 
-            pbar.set_postfix(train_loss=f"{train_loss:.4f}", test_loss=f"{test_loss:.4f}")
+            elapsed = time.perf_counter() - t_start
+            eta_sec = (elapsed / (epoch + 1)) * (self.epochs - epoch - 1) if epoch < self.epochs - 1 else 0
+            eta_str = f", ETA {eta_sec:.0f}s" if eta_sec > 0 else ""
+            logger.info(
+                "Epoch %d/%d: train_loss=%.4f test_loss=%.4f (%.1fs)%s",
+                epoch + 1,
+                self.epochs,
+                train_loss,
+                test_loss,
+                elapsed,
+                eta_str,
+            )
 
         if self.return_model == "lowest_test" and best_test_state is not None:
             model.load_state_dict(best_test_state)
@@ -370,69 +386,31 @@ class MapBuilderEstimateNet(MapBuilderBase):
 
         return model
 
-    def _run_inference(
+    def _model_forward(
         self,
-        model: MapEstimateNet,
-        elevation: np.ndarray,
-        transform: rasterio.Affine,
-        strength_lo: float,
-        strength_hi: float,
-    ) -> np.ndarray:
-        """Run model inference on full grid. Returns denormalized strength array."""
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = model.to(device)
-        model.eval()
-        h, w = elevation.shape
-        stride = self.grid_stride
-        n_rows = (h + stride - 1) // stride
-        n_cols = (w + stride - 1) // stride
-        pred_sparse = np.zeros((n_rows, n_cols), dtype=np.float32)
-        with torch.no_grad():
-            for ri, r in enumerate(tqdm(range(0, h, stride), desc="Inference", unit="row")):
-                for ci, c in enumerate(range(0, w, stride)):
-                    lon, lat = rasterio.transform.xy(transform, r, c)
-                    patch = _extract_elevation_patch(elevation, transform, float(lat), float(lon), self.patch_size_m, self.image_size)
-                    patch_batch = patch.unsqueeze(0).to(device)
-                    pred = model(patch_batch)
-                    val = pred[0, 0, self.image_size // 2, self.image_size // 2].item()
-                    pred_sparse[ri, ci] = val
-        pred_t = torch.from_numpy(pred_sparse).unsqueeze(0).unsqueeze(0)
-        pred_grid = (
-            nn.functional.interpolate(pred_t, size=(h, w), mode="bilinear", align_corners=False).squeeze().numpy().astype(np.float32)
-        )
-        pred_grid = np.clip(pred_grid, 0, 1)
-        return pred_grid * (strength_hi - strength_lo) + strength_lo
+        model: MapEstimateNetSimple,
+        batch: torch.Tensor,
+        time_day_norm: torch.Tensor | None = None,
+        time_year_norm: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Override in subclasses for models with different forward signatures. Default: model(batch)."""
+        return model(batch)
 
+    @abstractmethod
     def _run_inference_on_points(
         self,
-        model: MapEstimateNet,
-        elevation: np.ndarray,
-        transform: rasterio.Affine,
-        strength_lo: float,
-        strength_hi: float,
-        lats: np.ndarray,
-        lons: np.ndarray,
-        batch_size: int = 64,
+        bounding_box: BoundingBox,
+        df: pd.DataFrame,
     ) -> np.ndarray:
-        """Run model inference on (lat, lon) points. Returns denormalized strength array."""
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = model.to(device)
-        model.eval()
-        patches = [
-            _extract_elevation_patch(elevation, transform, float(lat), float(lon), self.patch_size_m, self.image_size)
-            for lat, lon in zip(lats, lons, strict=True)
-        ]
-        inp = torch.stack(patches).to(device)
-        pred_values: list[float] = []
-        with torch.no_grad():
-            for i in range(0, len(inp), batch_size):
-                batch = inp[i : i + batch_size]
-                pred = model(batch)
-                for j in range(pred.shape[0]):
-                    val = pred[j, 0, self.image_size // 2, self.image_size // 2].item()
-                    val = np.clip(val, 0, 1)
-                    pred_values.append(float(val * (strength_hi - strength_lo) + strength_lo))
-        return np.array(pred_values, dtype=np.float64)
+        pass
+
+    @abstractmethod
+    def _run_inference_on_grid(
+        self,
+        bounding_box: BoundingBox,
+        inference_params: dict,
+    ) -> tuple[np.ndarray, rasterio.Affine]:
+        pass
 
     def _build_impl(
         self,
@@ -440,33 +418,14 @@ class MapBuilderEstimateNet(MapBuilderBase):
         df: pd.DataFrame | None = None,
     ) -> dict[str, VectorMapArray]:
         """Build strength map by loading model from repository and running inference."""
-
-        repo_models = RepositoryModels.get_instance()
-        model_data = repo_models.get_model(self.name, **self.get_model_cache_params())
-        if model_data is None:
-            raise FileNotFoundError(f"Model not found in repository for {self.name}. Run train mode first to train and save the model.")
-
-        repo_terrain = RepositoryTerrain.get_instance()
-        terrain = repo_terrain.get_elevation(bounding_box)
-        elevation = terrain["elevation"]
-        transform = terrain["transform"]
-
-        strength_lo = model_data.get("strength_lo")
-        strength_hi = model_data.get("strength_hi")
-        if strength_lo is None or strength_hi is None:
-            raise ValueError("strength_lo and strength_hi must be set in model data")
-        if strength_hi <= strength_lo:
-            raise ValueError("strength_hi must be greater than strength_lo")
-
-        model = MapEstimateNet(
-            in_channels=model_data["in_channels"],
-            out_channels=model_data["out_channels"],
-            size=model_data["image_size"],
+        logger.info("Running inference on grid")
+        strength_arr, transform = self._run_inference_on_grid(
+            bounding_box,
+            inference_params={
+                "time_of_day_h": 12.0,
+                "time_of_year_d": 182.5,
+            },
         )
-        model.load_state_dict(model_data["state_dict"])
-
-        logger.info("Loaded model from repository, running inference")
-        strength_arr = self._run_inference(model, elevation, transform, strength_lo, strength_hi)
 
         return {
             "strength": VectorMapArray(
@@ -479,50 +438,26 @@ class MapBuilderEstimateNet(MapBuilderBase):
 
     def evaluate(
         self,
-        vector_map: VectorMapArray,
+        bounding_box: BoundingBox,
         evaluate_df: pd.DataFrame,
-        column_name: str,
-        n_train: int,
     ) -> MapEvaluateResult:
-        """Evaluate estimated climb maps on held-out points. Builds dataset from points and runs inference directly."""
+        """Evaluate on held-out points. Runs inference on points directly (no map building).
+        Provide vector_map (for its bounding_box) or bounding_box."""
         if len(evaluate_df) == 0:
             raise ValueError("evaluate_df is empty")
-        if "lat" not in evaluate_df.columns or "lon" not in evaluate_df.columns or column_name not in evaluate_df.columns:
-            raise ValueError("evaluate_df must have columns 'lat', 'lon', and 'column_name'")
-        lats = evaluate_df["lat"].values
-        lons = evaluate_df["lon"].values
-        true_values = evaluate_df[column_name].values
-        bounding_box = vector_map.bounding_box
-        repo_models = RepositoryModels.get_instance()
-        model_data = repo_models.get_model(self.name, **self.get_model_cache_params())
-        if model_data is None:
-            raise FileNotFoundError(f"Model not found in repository for {self.name}. Run train mode first.")
-        strength_lo = model_data.get("strength_lo")
-        strength_hi = model_data.get("strength_hi")
-        if strength_lo is None or strength_hi is None:
-            raise ValueError("strength_lo and strength_hi must be set in model data")
-        if strength_hi <= strength_lo:
-            raise ValueError("strength_hi must be greater than strength_lo")
+        if "lat" not in evaluate_df.columns or "lon" not in evaluate_df.columns or "strength" not in evaluate_df.columns:
+            raise ValueError("evaluate_df must have columns 'lat', 'lon', and 'strength'")
 
-        repo_terrain = RepositoryTerrain.get_instance()
-        terrain = repo_terrain.get_elevation(bounding_box)
-        elevation = terrain["elevation"]
-        transform = terrain["transform"]
-
-        model = MapEstimateNet(
-            in_channels=model_data["in_channels"],
-            out_channels=model_data["out_channels"],
-            size=model_data["image_size"],
+        true_values = evaluate_df["strength"].to_numpy(dtype=np.float64)
+        pred_values = self._run_inference_on_points(
+            bounding_box,
+            evaluate_df,
         )
-        model.load_state_dict(model_data["state_dict"])
-
-        pred_values = self._run_inference_on_points(model, elevation, transform, strength_lo, strength_hi, lats, lons)
         errors = np.abs(pred_values - true_values)
 
         return MapEvaluateResult(
             strength_mae=float(np.mean(errors)),
             strength_rmse=float(np.sqrt(np.mean(errors**2))),
-            n_train=n_train,
             n_holdout=len(evaluate_df),
             true_values=true_values,
             pred_values=pred_values,
