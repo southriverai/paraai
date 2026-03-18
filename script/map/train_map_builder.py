@@ -166,10 +166,13 @@ async def run_train_mode(
     map_builder: MapBuilderEstimateBase,
 ) -> None:
     """Load dataset from RepositoryDatasets (or build from region if missing), train model, save model."""
+    repo_models = RepositoryModels.get_instance()
     bounding_box = get_bounding_box(region)
     data = await dataset_builder.build_dataset(
         bounding_box,
     )
+    dataset_id = data["dataset_id"]
+    model_id = map_builder.get_model_id(dataset_id)
 
     input_maps_train = data["input_maps_train"]
     target_maps_train = data["target_maps_train"]
@@ -227,8 +230,6 @@ async def run_train_mode(
     n_train = len(train_inp)
     n_test = len(test_inp)
 
-    cache_params = {k: v for k, v in map_builder.get_model_cache_params().items() if k != "image_size"}
-    cache_params["image_size"] = image_size
     repo_train_logs = RepositoryTrainLogs.get_instance()
     training_metrics: list[dict] = []
 
@@ -307,7 +308,7 @@ async def run_train_mode(
             }
         )
         train_log = TrainLog(region=region, builder_name=map_builder.name, epochs=training_metrics)
-        log_path = repo_train_logs.save_train_log(train_log, map_builder.name, **cache_params)
+        log_path = repo_train_logs.save_train_log(map_builder.name, model_id, train_log)
 
         eta_sec = (elapsed / (epoch + 1)) * (map_builder.epochs - epoch - 1) if epoch < map_builder.epochs - 1 else 0
         eta_str = f", ETA {eta_sec:.0f}s" if eta_sec > 0 else ""
@@ -330,22 +331,21 @@ async def run_train_mode(
         model.load_state_dict(best_state)
 
     train_log = TrainLog(region=region, builder_name=map_builder.name, epochs=training_metrics)
-    log_path = repo_train_logs.save_train_log(train_log, map_builder.name, **cache_params)
+    log_path = repo_train_logs.save_train_log(map_builder.name, model_id, train_log)
 
-    repo_models = RepositoryModels.get_instance()
-    model_cache_params = {k: v for k, v in map_builder.get_model_cache_params().items() if k != "image_size"}
     repo_models.save_model(
-        model.state_dict(),
-        in_c,
-        out_c,
-        image_size,
         map_builder.name,
+        model_id,
+        in_channels=in_c,
+        out_channels=out_c,
+        image_size=meta["image_size"],
+        patch_size_m=meta["patch_size_m"],
+        grid_stride=meta["grid_stride"],
+        state_dict=model.state_dict(),
         strength_lo=meta["strength_lo"],
         strength_hi=meta["strength_hi"],
-        **model_cache_params,
     )
     logger.info("Saved model to RepositoryModels")
-    _plot_all_training_results(log_path)
 
 
 async def run_show_patch_mode(
@@ -434,15 +434,16 @@ async def run_estimate_mode(
     map_builder: MapBuilderEstimateBase,
 ) -> None:
     """Load trained model from RepositoryModels, run inference on region, cache strength map."""
-    from paraai.repository.repository_models import RepositoryModels
 
     bounding_box = get_bounding_box(region)
     repo_models = RepositoryModels.get_instance()
-    model_data = repo_models.get_model(map_builder.name, **map_builder.get_model_cache_params())
+    dataset_id = dataset_builder.get_dataset_id(bounding_box)
+    model_id = map_builder.get_model_id(dataset_id)
+    model_data = repo_models.get_model(map_builder.name, model_id)
     if model_data is None:
         raise FileNotFoundError(f"Model not found in RepositoryModels for {map_builder.name}. Run train mode first.")
 
-    map_builder.build(bounding_box, ignore_cache=True)
+    map_builder.build(bounding_box, ignore_cache=True, model_id=model_id)
     logger.info("Built and cached strength map")
 
 
@@ -454,6 +455,8 @@ async def run_train_eval_mode(
     """Train model, then evaluate on holdout. No map building - inference on test patches only."""
     await run_train_mode(region, dataset_builder, map_builder)
     bounding_box = get_bounding_box(region)
+    dataset_id = dataset_builder.get_dataset_id(bounding_box)
+    model_id = map_builder.get_model_id(dataset_id)
     repo_simple_climb = RepositorySimpleClimb.get_instance()
     climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bounding_box, verbose=True)
     train_climbs, holdout_climbs = dataset_builder.split_climbs(climbs)
@@ -461,6 +464,7 @@ async def run_train_eval_mode(
     eval_result = map_builder.evaluate(
         bounding_box=bounding_box,
         evaluate_df=holdout_df,
+        model_id=model_id,
     )
     print("\n" + "=" * 60)
     print(f"Map evaluation (n_train={len(train_climbs)}, n_holdout={len(holdout_climbs)})")
@@ -475,7 +479,6 @@ async def run_eval_mode(
     map_builder: MapBuilderEstimateBase,
 ) -> None:
     """Evaluate on holdout data, print MAE/RMSE to console (requires trained model)."""
-    from paraai.repository.repository_models import RepositoryModels
 
     bounding_box = get_bounding_box(region)
     repo_models = RepositoryModels.get_instance()

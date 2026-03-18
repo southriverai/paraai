@@ -45,27 +45,18 @@ class MapBuilderEstimateBase(MapBuilderBase):
         self.lr = lr
         self.return_model = return_model
 
-    def get_builder_id(self) -> str:
-        """Builder identity string for cache keying."""
-        params = {}
+    def get_model_id(self, dataset_id: str) -> str:
+        """Params for cache key. Uses builder_name and dataset_id for model identification."""
+        params = {
+            "builder_name": self.name,
+            "dataset_id": dataset_id,
+            "epochs": self.epochs,
+            "batch_size": self.batch_size,
+            "lr": self.lr,
+            "return_model": self.return_model,
+        }
         s = json.dumps(params, sort_keys=True)
         return hashlib.sha256(s.encode()).hexdigest()[:16]
-
-    def get_model_id(self) -> dict:
-        """Params for cache key. Uses builder_id for estimate builders."""
-        return {"builder_id": self.get_builder_id()}
-
-    def get_cache_params(self) -> dict:
-        """Params for cache key. Delegates to get_model_id."""
-        return self.get_model_id()
-
-    def get_model_cache_params(self) -> dict:
-        """Params for model cache key (excludes split params)."""
-        return {
-            "patch_size_m": self.patch_size_m,
-            "image_size": self.image_size,
-            "grid_stride": self.grid_stride,
-        }
 
     def _get_model_class(self) -> type[MapEstimateNetSimple]:
         raise NotImplementedError("Subclasses must implement _get_model_class")
@@ -90,6 +81,7 @@ class MapBuilderEstimateBase(MapBuilderBase):
         self,
         bounding_box: BoundingBox,
         df: pd.DataFrame,
+        model_id: str,
     ) -> np.ndarray:
         pass
 
@@ -98,6 +90,7 @@ class MapBuilderEstimateBase(MapBuilderBase):
         self,
         bounding_box: BoundingBox,
         inference_params: dict,
+        model_id: str,
     ) -> tuple[np.ndarray, rasterio.Affine]:
         pass
 
@@ -105,15 +98,19 @@ class MapBuilderEstimateBase(MapBuilderBase):
         self,
         bounding_box: BoundingBox,
         df: pd.DataFrame | None = None,
+        model_id: str | None = None,
     ) -> dict[str, VectorMapArray]:
         """Build strength map by loading model from repository and running inference."""
         logger.info("Running inference on grid")
+        if model_id is None:
+            raise ValueError("model_id is required")
         strength_arr, transform = self._run_inference_on_grid(
             bounding_box,
             inference_params={
                 "time_of_day_h": 12.0,
                 "time_of_year_d": 182.5,
             },
+            model_id=model_id,
         )
 
         return {
@@ -129,6 +126,7 @@ class MapBuilderEstimateBase(MapBuilderBase):
         self,
         bounding_box: BoundingBox,
         evaluate_df: pd.DataFrame,
+        model_id: str,
     ) -> MapEvaluateResult:
         """Evaluate on held-out points. Runs inference on points directly (no map building).
         Provide vector_map (for its bounding_box) or bounding_box."""
@@ -141,6 +139,7 @@ class MapBuilderEstimateBase(MapBuilderBase):
         pred_values = self._run_inference_on_points(
             bounding_box,
             evaluate_df,
+            model_id=model_id,
         )
         errors = np.abs(pred_values - true_values)
 

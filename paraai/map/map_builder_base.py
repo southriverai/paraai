@@ -14,6 +14,7 @@ import pandas as pd
 
 from paraai.map.vectror_map_array import VectorMapArray
 from paraai.model.boundingbox import BoundingBox
+from paraai.tool_string import validate_safe_name
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +42,16 @@ class MapBuilderBase:
         name: str,
         output_map_names: list[str],
     ):
+        validate_safe_name(name)
         self.name = name
         if len(output_map_names) == 0:
             raise ValueError("output_map_names must be a non-empty list")
         self.output_map_names = output_map_names
 
+    @abstractmethod
     def get_cache_params(self) -> dict:
         """Parameters that affect cache identity. Override in subclasses."""
-        return {}
+        raise NotImplementedError("Subclasses must implement get_cache_params")
 
     def get_builder_id(self) -> str:
         """Builder identity string for cache keying. Override for custom logic."""
@@ -62,6 +65,7 @@ class MapBuilderBase:
         df: pd.DataFrame | None = None,
         *,
         ignore_cache: bool = False,
+        model_id: str | None = None,
     ) -> dict[str, VectorMapArray]:
         """Build or load from cache. When ignore_cache=False, returns cached maps if available."""
         if not ignore_cache:
@@ -69,7 +73,7 @@ class MapBuilderBase:
             if maps is not None:
                 logger.info("Loaded %s maps from cache", self.name)
                 return maps
-        maps = self._build_impl(bounding_box, df)
+        maps = self._build_impl(bounding_box, df, model_id=model_id)
         self.save_maps(maps, bounding_box)
         return maps
 
@@ -96,6 +100,7 @@ class MapBuilderBase:
         self,
         bounding_box: BoundingBox,
         df: pd.DataFrame | None = None,
+        model_id: str | None = None,
     ) -> dict[str, VectorMapArray]:
         """Build maps. Override in subclasses."""
         pass

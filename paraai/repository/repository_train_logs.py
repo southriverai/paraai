@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Optional
 
 from paraai.model.train_log import TrainLog
-from paraai.tools_models import get_model_cache_id
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +33,9 @@ class RepositoryTrainLogs:
             raise ValueError("RepositoryTrainLogs not initialized")
         return RepositoryTrainLogs.instance
 
-    def get_train_log(self, builder_name: str, **params: object) -> TrainLog | None:
+    def get_train_log(self, builder_name: str, model_id: str) -> TrainLog | None:
         """Load train log from cache if it exists. Uses same ID as model repository."""
-        cache_id = get_model_cache_id(builder_name, **params)
-        path = self._path(builder_name, cache_id)
+        path = self._path(builder_name, model_id)
         if not path.exists():
             return None
         with path.open(encoding="utf-8") as f:
@@ -45,10 +43,14 @@ class RepositoryTrainLogs:
         logger.debug("Loaded train log from cache %s", path)
         return TrainLog.from_dict(data)
 
-    def save_train_log(self, train_log: TrainLog, builder_name: str, **params: object) -> Path:
+    def save_train_log(
+        self,
+        builder_name: str,
+        model_id: str,
+        train_log: TrainLog,
+    ) -> Path:
         """Save train log to cache. Uses same ID as model repository. Returns path."""
-        cache_id = get_model_cache_id(builder_name, **params)
-        path = self._path(builder_name, cache_id)
+        path = self._path(builder_name, model_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as f:
             json.dump(train_log.to_dict(), f, indent=2)

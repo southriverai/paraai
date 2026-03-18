@@ -40,6 +40,7 @@ class MapBuilderConvolutionWeighted(MapBuilderBase):
         self,
         bounding_box: BoundingBox,
         df: pd.DataFrame,
+        model_id: str | None = None,
     ) -> dict[str, VectorMapArray]:
         """Build estimated climb map from DataFrame with columns lat and lon (and optionally count, strength) using Gaussian convolution."""
         if df.empty:

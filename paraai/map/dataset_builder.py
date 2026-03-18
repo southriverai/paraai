@@ -6,6 +6,7 @@ import logging
 import random
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,7 @@ from paraai.model.simple_climb import SimpleClimb
 from paraai.repository.repository_datasets import RepositoryDatasets
 from paraai.repository.repository_simple_climb import RepositorySimpleClimb
 from paraai.repository.repository_terrain import RepositoryTerrain
+from paraai.tool_string import dict_to_cache_id, validate_safe_name
 
 logger = logging.getLogger(__name__)
 
@@ -121,9 +123,6 @@ class MapEstimateDataset(Dataset):
         return (inp, tgt)
 
 
-from typing import Literal
-
-
 class DatasetBuilder:
     """Builds MapEstimateDataset from bounding box and DataFrame(s). Handles cache and get_or_build."""
 
@@ -139,6 +138,8 @@ class DatasetBuilder:
         builder_name: str = "MapEstimateDataset",
     ) -> None:
         """Initialize DatasetBuilder with type, patch size, image size, grid stride, test fraction, and split seed."""
+
+        validate_safe_name(builder_name)
         self.builder_name = builder_name
         self.dataset_builder_type = dataset_builder_type
         self.patch_size_m = patch_size_m
@@ -147,16 +148,18 @@ class DatasetBuilder:
         self.test_frac = test_frac
         self.split_seed = split_seed
 
-    def get_cache_params(self) -> dict:
+    def get_dataset_id(self, bounding_box: BoundingBox) -> str:
         """Params for dataset cache key (includes split params and dataset_builder_type)."""
-        return {
-            "dataset_builder_type": self.dataset_builder_type,
-            "test_frac": self.test_frac,
-            "split_seed": self.split_seed,
-            "patch_size_m": self.patch_size_m,
-            "image_size": self.image_size,
-            "grid_stride": self.grid_stride,
-        }
+        return dict_to_cache_id(
+            builder_name=self.builder_name,
+            dataset_builder_type=self.dataset_builder_type,
+            patch_size_m=self.patch_size_m,
+            image_size=self.image_size,
+            grid_stride=self.grid_stride,
+            test_frac=self.test_frac,
+            split_seed=self.split_seed,
+            bbox=[bounding_box.lat_min, bounding_box.lat_max, bounding_box.lon_min, bounding_box.lon_max],
+        )
 
     @staticmethod
     def _alt_norm(alt_m: float) -> float:
@@ -376,12 +379,10 @@ class DatasetBuilder:
         """
         repo_simple_climb = RepositorySimpleClimb.get_instance()
         repo_datasets = RepositoryDatasets.get_instance()
-
-        params = self.get_cache_params()
-        if not ignore_cache and params:
-            dataset_cache_id = repo_datasets.get_dataset_cache_id(self.builder_name, bounding_box, **params)
+        dataset_id = self.get_dataset_id(bounding_box)
+        if not ignore_cache:
             try:
-                data = repo_datasets.get_dataset(self.builder_name, dataset_cache_id)
+                data = repo_datasets.get_dataset(self.builder_name, dataset_id)
                 n_train = len(data["input_maps_train"])
                 n_test = len(data["input_maps_test"])
                 logger.info("Loaded dataset from cache (%s train, %s test patches)", n_train, n_test)
@@ -413,6 +414,7 @@ class DatasetBuilder:
                 "bounding_box": bounding_box.model_dump(),
             },
         }
+        data["dataset_id"] = dataset_id
         data["time_of_day_train"] = train_result.time_of_day
         data["time_of_year_train"] = train_result.time_of_year
         data["time_of_day_test"] = test_result.time_of_day
@@ -424,9 +426,7 @@ class DatasetBuilder:
         data["start_alt_test"] = test_result.start_alt
         data["end_alt_test"] = test_result.end_alt
 
-        params = self.get_cache_params()
-        dataset_cache_id = repo_datasets.get_dataset_cache_id(self.builder_name, bounding_box, **params)
-        repo_datasets.save_dataset(data, self.builder_name, dataset_cache_id)
+        repo_datasets.save_dataset(self.builder_name, dataset_id, data)
         logger.info(
             "Cached dataset (%s train, %s test patches, %s zero-climb points) to repository",
             len(train_result.input_maps),

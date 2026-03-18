@@ -26,6 +26,7 @@ class MapBuilderAverage(MapBuilderBase):
         self,
         bounding_box: BoundingBox,
         df: pd.DataFrame,
+        model_id: str | None = None,
     ) -> dict[str, VectorMapArray]:
         """Build estimated climb map from DataFrame with columns lat and lon (and optionally count, strength)."""
         if "lat" not in df.columns or "lon" not in df.columns:
