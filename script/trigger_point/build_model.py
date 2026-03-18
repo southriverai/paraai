@@ -14,10 +14,9 @@ import numpy as np
 import rasterio
 import torch
 from torch import nn
-from torch.utils.data import Dataset
 
-from paraai.map.map_estimate_net import MapEstimateNetSimpleSimple
-from paraai.model.boundingbox import BoundingBox
+from paraai.map.dataset_builder import MapEstimateDataset, extract_elevation_patch
+from paraai.map.map_estimate_net import MapEstimateNetSimple
 from paraai.repository.repository_trigger_point import RepositoryTriggerPoint
 from paraai.tool_spacetime import haversine_km_tuple
 from paraai.tools_terrain import load_terrain
@@ -30,71 +29,6 @@ def evaluate(climbs: list) -> float:
     logger.debug("evaluate(climbs=%s)", len(climbs))
     _ = climbs
     return 0.0
-
-
-class MapDataset(Dataset):
-    """Dataset of (input_map, target_map) pairs as tensors."""
-
-    def __init__(
-        self,
-        input_maps: list[torch.Tensor],
-        target_maps: list[torch.Tensor] | None = None,
-        example_map: torch.Tensor | None = None,
-    ) -> None:
-        """
-        Args:
-            input_maps: List of input images (C, H, W).
-            target_maps: List of target images. If None, use example_map for all.
-            example_map: Single target map used for all inputs when target_maps is None.
-        """
-        self.input_maps = input_maps
-        if target_maps is not None:
-            self.target_maps = target_maps
-        elif example_map is not None:
-            self.target_maps = [example_map] * len(input_maps)
-        else:
-            raise ValueError("Provide target_maps or example_map")
-        assert len(self.input_maps) == len(self.target_maps)
-
-    def __len__(self) -> int:
-        return len(self.input_maps)
-
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.input_maps[idx], self.target_maps[idx]
-
-
-def _extract_elevation_patch(
-    elevation: np.ndarray,
-    transform: rasterio.Affine,
-    lat: float,
-    lon: float,
-    radius_m: float,
-    size: int,
-) -> torch.Tensor:
-    """Extract elevation patch centered on (lat, lon), resize to (1, size, size), normalize to [0,1]."""
-    bbox = BoundingBox.from_latlon_radius(lat, lon, radius_m)
-    lon_min, lat_min, lon_max, lat_max = bbox.lon_min, bbox.lat_min, bbox.lon_max, bbox.lat_max
-    from rasterio.windows import from_bounds
-
-    win = from_bounds(lon_min, lat_min, lon_max, lat_max, transform)
-    h, w = elevation.shape
-    r0 = int(max(0, win.row_off))
-    c0 = int(max(0, win.col_off))
-    r1 = int(min(h, win.row_off + win.height))
-    c1 = int(min(w, win.col_off + win.width))
-    patch = elevation[r0:r1, c0:c1].astype(np.float32)
-    valid = ~np.isnan(patch) & (patch > -500)
-    if np.any(valid):
-        lo, hi = np.percentile(patch[valid], [2, 98])
-        patch = np.clip((patch - lo) / (hi - lo + 1e-10), 0, 1)
-    else:
-        patch = np.zeros_like(patch)
-    patch = np.nan_to_num(patch, nan=0.0).astype(np.float32)
-    if patch.size == 0:
-        return torch.zeros(1, size, size, dtype=torch.float32)
-    t = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).to(torch.float32)
-    t = nn.functional.interpolate(t, size=(size, size), mode="bilinear").squeeze(0)
-    return t
 
 
 def train_model(
@@ -126,7 +60,7 @@ def train_model(
     device = torch.device(device)
     logger.info("Training on %s", device)
 
-    dataset = MapDataset(input_maps, example_map=example_map)
+    dataset = MapEstimateDataset(input_maps, example_map=example_map)
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     in_c = input_maps[0].shape[0]
@@ -273,13 +207,13 @@ def build_dataset_from_trigger_point_name(
 
     logger.debug("Extracting %s positive patches", len(positives))
     for lat, lon in positives:
-        patch = _extract_elevation_patch(elevation, transform, lat, lon, patch_size_m, image_size)
+        patch = extract_elevation_patch(elevation, transform, lat, lon, patch_size_m, image_size)
         input_maps.append(patch)
         target_maps.append(torch.ones(1, image_size, image_size))
 
     logger.debug("Extracting %s negative patches", len(negatives))
     for lat, lon in negatives:
-        patch = _extract_elevation_patch(elevation, transform, lat, lon, patch_size_m, image_size)
+        patch = extract_elevation_patch(elevation, transform, lat, lon, patch_size_m, image_size)
         input_maps.append(patch)
         target_maps.append(torch.zeros(1, image_size, image_size))
 
@@ -333,7 +267,7 @@ def build_model(
     if not input_maps:
         raise ValueError("No maps provided")
 
-    dataset = MapDataset(input_maps, target_maps=target_maps)
+    dataset = MapEstimateDataset(input_maps, target_maps=target_maps)
     n_total = len(dataset)
     n_test = max(1, int(n_total * test_frac))
     n_train = n_total - n_test
@@ -490,7 +424,7 @@ def visualize_region_and_prediction(
         for ri, r in enumerate(range(0, h, stride)):
             for ci, c in enumerate(range(0, w, stride)):
                 lon, lat = rasterio.transform.xy(transform, r, c)
-                patch = _extract_elevation_patch(elevation, transform, lat, lon, patch_size_m, image_size)
+                patch = extract_elevation_patch(elevation, transform, lat, lon, patch_size_m, image_size)
                 patch_batch = patch.unsqueeze(0).to(device)
                 pred = model(patch_batch)
                 val = pred[0, 0, image_size // 2, image_size // 2].item()

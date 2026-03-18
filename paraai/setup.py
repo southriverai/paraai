@@ -10,6 +10,7 @@ from paraai.repository.repository_simple_climb_pixel import RepositorySimpleClim
 from paraai.repository.repository_terrain import RepositoryTerrain
 from paraai.repository.repository_tracklog_body import RepositoryTracklogBody
 from paraai.repository.repository_tracklog_header import RepositoryTracklogHeader
+from paraai.repository.repository_train_logs import RepositoryTrainLogs
 
 logger = logging.getLogger(__name__)
 
@@ -23,20 +24,24 @@ def setup_logging():
 def setup_database():
     logger.info("Setting up database")
     path_sqlite = Path("data", "database_sqlite")
+    RepositorySimpleClimb.initialize_sqlite(path_sqlite)
+    RepositorySimpleClimbPixel.initialize_sqlite(path_sqlite)
+    RepositoryTracklogBody.initialize_sqlite(path_sqlite)
+    RepositoryTracklogHeader.initialize_sqlite(path_sqlite)
+
     path_cache = Path("data", "database_cache")
     path_terrain = Path("data", "database_terrain")
     path_maps = Path("data", "database_maps")
     path_datasets = Path("data", "database_datasets")
     path_models = Path("data", "database_models")
-    RepositorySimpleClimb.initialize_sqlite(path_sqlite)
-    RepositorySimpleClimbPixel.initialize_sqlite(path_sqlite)
-    RepositoryTracklogBody.initialize_sqlite(path_sqlite)
-    RepositoryTracklogHeader.initialize_sqlite(path_sqlite)
+    path_train_logs = Path("data", "database_train_logs")
+
     RepositoryCache.initialize(path_cache)
     RepositoryTerrain.initialize(path_terrain)
     RepositoryMaps.initialize(path_maps)
     RepositoryDatasets.initialize(path_datasets)
     RepositoryModels.initialize(path_models)
+    RepositoryTrainLogs.initialize(path_train_logs)
     logger.info("Database setup complete")
 
 

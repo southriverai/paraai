@@ -1,4 +1,4 @@
-"""Map builder: estimate climb strength from elevation patches (simple, no time)."""
+"""Map builder: estimate climb strength from elevation patches (same architecture as Time, scalar output)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ import torch
 from torch import nn
 from tqdm import tqdm
 
-from paraai.map.map_builder_estimate_base import MapBuilderEstimateBase, _extract_elevation_patch
+from paraai.map.map_builder_estimate_base import MapBuilderEstimateBase
+from paraai.map.dataset_builder import extract_elevation_patch
+from paraai.map.map_estimate_net import MapEstimateNetSimple
 from paraai.model.boundingbox import BoundingBox
 from paraai.repository.repository_models import RepositoryModels
 from paraai.repository.repository_terrain import RepositoryTerrain
@@ -18,15 +20,11 @@ from paraai.repository.repository_terrain import RepositoryTerrain
 class MapBuilderEstimateSimple(MapBuilderEstimateBase):
     """
     Map builder that trains a CNN to estimate strength from elevation patches.
-
-    Uses strength from the DataFrame at each point as target. Takes a DataFrame with lat, lon, strength.
+    Same architecture as MapBuilderEstimateTime: encoder + time -> scalar output.
     """
 
     def __init__(
         self,
-        patch_size_m: float = 500.0,
-        image_size: int = 64,
-        grid_stride: int = 16,
         *,
         epochs: int = 5,
         batch_size: int = 8,
@@ -35,26 +33,43 @@ class MapBuilderEstimateSimple(MapBuilderEstimateBase):
     ) -> None:
         super().__init__(
             name="MapBuilderEstimateSimple",
-            patch_size_m=patch_size_m,
-            image_size=image_size,
-            grid_stride=grid_stride,
             epochs=epochs,
             batch_size=batch_size,
             lr=lr,
             return_model=return_model,
         )
 
+    def _get_model_class(self) -> type[MapEstimateNetSimple]:
+        return MapEstimateNetSimple
+
+    def _model_forward(
+        self,
+        model: MapEstimateNetSimple,
+        batch: torch.Tensor,
+        time_day_norm: torch.Tensor | None = None,
+        time_year_norm: torch.Tensor | None = None,
+        ground_alt_norm: torch.Tensor | None = None,
+        start_alt_norm: torch.Tensor | None = None,
+        end_alt_norm: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if time_day_norm is None or time_year_norm is None or ground_alt_norm is None:
+            raise ValueError("MapEstimateNetSimple requires time and altitude")
+        return model(batch, time_day_norm, time_year_norm, ground_alt_norm, start_alt_norm, end_alt_norm)
+
     def _run_inference_on_points(
         self,
         bounding_box: BoundingBox,
         df: pd.DataFrame,
     ) -> np.ndarray:
-        """Run model inference on (lat, lon) points. Returns denormalized strength array."""
-        # load model from repository
+        """Run model inference on (lat, lon) points. Requires time and altitude columns in df."""
+        required = ["time_of_day_h", "time_of_year_d", "ground_alt_norm", "start_alt_norm", "end_alt_norm"]
+        for col in required:
+            if col not in df.columns:
+                raise ValueError(f"df must have column '{col}'")
         repo_models = RepositoryModels.get_instance()
         model_data = repo_models.get_model(self.name, **self.get_model_cache_params())
         if model_data is None:
-            raise FileNotFoundError(f"Model not found in repository for {self.name}. Run train mode first to train and save the model.")
+            raise FileNotFoundError(f"Model not found in repository for {self.name}. Run train mode first.")
         strength_lo = model_data.get("strength_lo")
         strength_hi = model_data.get("strength_hi")
         if strength_lo is None or strength_hi is None:
@@ -68,34 +83,44 @@ class MapBuilderEstimateSimple(MapBuilderEstimateBase):
         )
         model.load_state_dict(model_data["state_dict"])
 
-        # load terrain from repository
         repo_terrain = RepositoryTerrain.get_instance()
         terrain = repo_terrain.get_elevation(bounding_box)
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Running inference on {device}")
         model = model.to(device)
         model.eval()
 
         patches = [
-            _extract_elevation_patch(terrain["elevation"], terrain["transform"], float(lat), float(lon), self.patch_size_m, self.image_size)
+            extract_elevation_patch(terrain["elevation"], terrain["transform"], float(lat), float(lon), self.patch_size_m, self.image_size)
             for lat, lon in zip(df["lat"], df["lon"], strict=True)
         ]
         inp = torch.stack(patches).to(device)
-        pred = self._model_forward(model, inp)
-        return pred.cpu().numpy().flatten() * (strength_hi - strength_lo) + strength_lo
+        td_t = torch.from_numpy(np.clip(df["time_of_day_h"].to_numpy() / 24.0, 0.0, 1.0).astype(np.float32)).to(device)
+        ty_t = torch.from_numpy(np.clip(df["time_of_year_d"].to_numpy() / 365.0, 0.0, 1.0).astype(np.float32)).to(device)
+        ga_t = torch.from_numpy(df["ground_alt_norm"].to_numpy().astype(np.float32)).to(device)
+        sa_t = torch.from_numpy(df["start_alt_norm"].to_numpy().astype(np.float32)).to(device)
+        ea_t = torch.from_numpy(df["end_alt_norm"].to_numpy().astype(np.float32)).to(device)
+
+        with torch.no_grad():
+            pred = self._model_forward(model, inp, td_t, ty_t, ga_t, sa_t, ea_t)
+        pred_np = pred.cpu().numpy().flatten()
+        return np.clip(pred_np, 0, 1) * (strength_hi - strength_lo) + strength_lo
 
     def _run_inference_on_grid(
         self,
         bounding_box: BoundingBox,
         inference_params: dict,
-    ) -> np.ndarray:
-        """Run model inference on grid. Returns denormalized strength array."""
-        # load model from repository
+    ) -> tuple[np.ndarray, rasterio.Affine]:
+        """Run model inference on grid. Returns (strength_array, transform)."""
+        time_of_day_h = inference_params.get("time_of_day_h", 12.0)
+        time_of_year_d = inference_params.get("time_of_year_d", 182.5)
+        time_day_norm = float(np.clip(time_of_day_h / 24.0, 0.0, 1.0))
+        time_year_norm = float(np.clip(time_of_year_d / 365.0, 0.0, 1.0))
+
         repo_models = RepositoryModels.get_instance()
         model_data = repo_models.get_model(self.name, **self.get_model_cache_params())
         if model_data is None:
-            raise FileNotFoundError(f"Model not found in repository for {self.name}. Run train mode first to train and save the model.")
+            raise FileNotFoundError(f"Model not found in repository for {self.name}. Run train mode first.")
         strength_lo = model_data.get("strength_lo")
         strength_hi = model_data.get("strength_hi")
         if strength_lo is None or strength_hi is None:
@@ -109,7 +134,6 @@ class MapBuilderEstimateSimple(MapBuilderEstimateBase):
         )
         model.load_state_dict(model_data["state_dict"])
 
-        # load terrain from repository
         repo_terrain = RepositoryTerrain.get_instance()
         terrain = repo_terrain.get_elevation(bounding_box)
         elevation = terrain["elevation"]
@@ -119,21 +143,34 @@ class MapBuilderEstimateSimple(MapBuilderEstimateBase):
         n_rows = (h + stride - 1) // stride
         n_cols = (w + stride - 1) // stride
         pred_sparse = np.zeros((n_rows, n_cols), dtype=np.float32)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = model.to(device)
+        model.eval()
+        td_t = torch.tensor([time_day_norm], dtype=torch.float32, device=device)
+        ty_t = torch.tensor([time_year_norm], dtype=torch.float32, device=device)
+
+        def _alt_norm(alt_m: float) -> float:
+            return float(np.clip(alt_m / 10000.0, 0.0, 1.0))
+
         with torch.no_grad():
             for ri, r in enumerate(tqdm(range(0, h, stride), desc="Inference", unit="row")):
                 for ci, c in enumerate(range(0, w, stride)):
                     lon, lat = rasterio.transform.xy(transform, r, c)
-                    patch = _extract_elevation_patch(elevation, transform, float(lat), float(lon), self.patch_size_m, self.image_size)
-                    patch_batch = patch.unsqueeze(0)
-                    pred = self._model_forward(model, patch_batch)
-                    if pred.dim() == 2:
-                        val = pred[0, 0].item()
-                    else:
-                        val = pred[0, 0, self.image_size // 2, self.image_size // 2].item()
+                    elev_val = float(np.nan_to_num(elevation[r, c], nan=0.0))
+                    alt_n = _alt_norm(elev_val)
+                    ga_t = torch.tensor([alt_n], dtype=torch.float32, device=device)
+                    sa_t = ga_t
+                    ea_t = ga_t
+                    patch = extract_elevation_patch(elevation, transform, float(lat), float(lon), self.patch_size_m, self.image_size)
+                    patch_batch = patch.unsqueeze(0).to(device)
+                    pred = self._model_forward(model, patch_batch, td_t, ty_t, ga_t, sa_t, ea_t)
+                    val = pred[0, 0].item()
                     pred_sparse[ri, ci] = val
+
         pred_t = torch.from_numpy(pred_sparse).unsqueeze(0).unsqueeze(0)
         pred_grid = (
             nn.functional.interpolate(pred_t, size=(h, w), mode="bilinear", align_corners=False).squeeze().numpy().astype(np.float32)
         )
-        pred_grid = np.clip(pred_grid, 0, 1)
-        return pred_grid * (strength_hi - strength_lo) + strength_lo
+        pred_grid = pred_grid * (strength_hi - strength_lo) + strength_lo
+        return pred_grid, transform

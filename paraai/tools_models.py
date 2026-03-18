@@ -12,14 +12,19 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-def _model_cache_hash(builder_name: str, params: dict) -> str:
-    """Hash for cache key: builder + params."""
+def get_model_cache_id(builder_name: str, **params: object) -> str:
+    """Cache ID for model/train log. Same params produce same ID."""
     data = {
         "builder": builder_name,
         "params": dict(sorted(params.items())),
     }
     s = json.dumps(data, sort_keys=True, default=str)
     return hashlib.sha256(s.encode()).hexdigest()[:16]
+
+
+def _model_cache_hash(builder_name: str, params: dict) -> str:
+    """Hash for cache key: builder + params."""
+    return get_model_cache_id(builder_name, **params)
 
 
 def save_model(
