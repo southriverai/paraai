@@ -31,6 +31,12 @@ Usage examples (dataset-type and estimator-type always first):
 
   # 7. Show two random elevation patches from the training set
   python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --mode show_patch --region sopot
+
+  # 8. Show all training curves from repository
+  python script/map/train_map_builder.py --mode show_plots
+
+  # 9. Build dataset with flat_seed (remove climbs in flatlands, add 0-climb from flatlands)
+  python script/map/train_map_builder.py --dataset-type flat_seed --estimator-type time --mode dataset --region sopot
 """
 
 from __future__ import annotations
@@ -69,7 +75,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 1024  # TODO
+# BATCH_SIZE = 1024  # TODO
+
+
+BATCH_SIZE = 4096  # TODO
 
 
 def _alt_norm(alt_m: float) -> float:
@@ -164,7 +173,7 @@ async def run_train_mode(
     region: str,
     dataset_builder: DatasetBuilder,
     map_builder: MapBuilderEstimateBase,
-) -> None:
+) -> str:
     """Load dataset from RepositoryDatasets (or build from region if missing), train model, save model."""
     repo_models = RepositoryModels.get_instance()
     bounding_box = get_bounding_box(region)
@@ -200,21 +209,13 @@ async def run_train_mode(
         time_day_test = data["time_of_day_test"]
         time_year_test = data["time_of_year_test"]
         ground_alt_train = data["ground_alt_train"]
-        start_alt_train = data["start_alt_train"]
-        end_alt_train = data["end_alt_train"]
         ground_alt_test = data["ground_alt_test"]
-        start_alt_test = data["start_alt_test"]
-        end_alt_test = data["end_alt_test"]
         train_td = torch.tensor(time_day_train, dtype=torch.float32, device=device)
         train_ty = torch.tensor(time_year_train, dtype=torch.float32, device=device)
         test_td = torch.tensor(time_day_test, dtype=torch.float32, device=device)
         test_ty = torch.tensor(time_year_test, dtype=torch.float32, device=device)
         train_ga = torch.tensor(ground_alt_train, dtype=torch.float32, device=device)
-        train_sa = torch.tensor(start_alt_train, dtype=torch.float32, device=device)
-        train_ea = torch.tensor(end_alt_train, dtype=torch.float32, device=device)
         test_ga = torch.tensor(ground_alt_test, dtype=torch.float32, device=device)
-        test_sa = torch.tensor(start_alt_test, dtype=torch.float32, device=device)
-        test_ea = torch.tensor(end_alt_test, dtype=torch.float32, device=device)
 
     model = map_builder._get_model_class()(in_channels=in_c, out_channels=out_c, size=image_size).to(device)
     # print model architecture
@@ -257,9 +258,7 @@ async def run_train_mode(
                 batch_td = train_td[idx]
                 batch_ty = train_ty[idx]
                 batch_ga = train_ga[idx]
-                batch_sa = train_sa[idx]
-                batch_ea = train_ea[idx]
-                pred = model(batch_inp, batch_td, batch_ty, batch_ga, batch_sa, batch_ea)
+                pred = model(batch_inp, batch_td, batch_ty, batch_ga)
             else:
                 pred = model(batch_inp)
                 if pred.shape[2:] != batch_tgt.shape[2:]:
@@ -283,9 +282,7 @@ async def run_train_mode(
                     batch_td = test_td[i : i + BATCH_SIZE]
                     batch_ty = test_ty[i : i + BATCH_SIZE]
                     batch_ga = test_ga[i : i + BATCH_SIZE]
-                    batch_sa = test_sa[i : i + BATCH_SIZE]
-                    batch_ea = test_ea[i : i + BATCH_SIZE]
-                    pred = model(batch_inp, batch_td, batch_ty, batch_ga, batch_sa, batch_ea)
+                    pred = model(batch_inp, batch_td, batch_ty, batch_ga)
                 else:
                     pred = model(batch_inp)
                 test_loss += criterion(pred, batch_tgt).item()
@@ -313,19 +310,36 @@ async def run_train_mode(
         eta_sec = (elapsed / (epoch + 1)) * (map_builder.epochs - epoch - 1) if epoch < map_builder.epochs - 1 else 0
         eta_str = f", ETA {eta_sec:.0f}s" if eta_sec > 0 else ""
         logger.info(
-            "Epoch %d/%d: train_loss=%.4f test_loss=%.4f (%.1fs)%s",
+            "Epoch %d/%d: train_loss=%.4f test_loss=%.4f (%.1fs/epoch)%s",
             epoch + 1,
             map_builder.epochs,
             train_loss,
             test_loss,
-            elapsed,
+            epoch_duration,
             eta_str,
         )
 
         if interrupted:
             logger.info("Training interrupted by user.")
+            if best_state is not None:
+                model.load_state_dict(best_state)
+            train_log = TrainLog(region=region, builder_name=map_builder.name, epochs=training_metrics)
+            log_path = repo_train_logs.save_train_log(map_builder.name, model_id, train_log)
+            repo_models.save_model(
+                map_builder.name,
+                model_id,
+                in_channels=in_c,
+                out_channels=out_c,
+                image_size=meta["image_size"],
+                patch_size_m=meta["patch_size_m"],
+                grid_stride=meta["grid_stride"],
+                state_dict=model.state_dict(),
+                strength_lo=meta["strength_lo"],
+                strength_hi=meta["strength_hi"],
+            )
+            logger.info("Saved best model so far to RepositoryModels")
             _plot_all_training_results(log_path)
-            return
+            return model_id
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -346,6 +360,8 @@ async def run_train_mode(
         strength_hi=meta["strength_hi"],
     )
     logger.info("Saved model to RepositoryModels")
+    _plot_all_training_results(log_path)
+    return model_id
 
 
 async def run_show_patch_mode(
@@ -453,10 +469,8 @@ async def run_train_eval_mode(
     map_builder: MapBuilderEstimateBase,
 ) -> None:
     """Train model, then evaluate on holdout. No map building - inference on test patches only."""
-    await run_train_mode(region, dataset_builder, map_builder)
+    model_id = await run_train_mode(region, dataset_builder, map_builder)
     bounding_box = get_bounding_box(region)
-    dataset_id = dataset_builder.get_dataset_id(bounding_box)
-    model_id = map_builder.get_model_id(dataset_id)
     repo_simple_climb = RepositorySimpleClimb.get_instance()
     climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bounding_box, verbose=True)
     train_climbs, holdout_climbs = dataset_builder.split_climbs(climbs)
@@ -481,8 +495,10 @@ async def run_eval_mode(
     """Evaluate on holdout data, print MAE/RMSE to console (requires trained model)."""
 
     bounding_box = get_bounding_box(region)
+    dataset_id = dataset_builder.get_dataset_id(bounding_box)
+    model_id = map_builder.get_model_id(dataset_id)
     repo_models = RepositoryModels.get_instance()
-    model_data = repo_models.get_model(map_builder.name, **map_builder.get_model_cache_params())
+    model_data = repo_models.get_model(map_builder.name, model_id)
     if model_data is None:
         raise FileNotFoundError(f"Model not found in RepositoryModels for {map_builder.name}. Run train mode first.")
 
@@ -490,7 +506,7 @@ async def run_eval_mode(
     climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bounding_box, verbose=True)
     train_climbs, holdout_climbs = dataset_builder.split_climbs(climbs)
     holdout_df = _climbs_to_eval_df(holdout_climbs)
-    eval_result = map_builder.evaluate(bounding_box, holdout_df)
+    eval_result = map_builder.evaluate(bounding_box, holdout_df, model_id=model_id)
     print("\n" + "=" * 60)
     print(f"Map evaluation (n_train={len(train_climbs)}, n_holdout={len(holdout_climbs)})")
     print("=" * 60)
@@ -506,8 +522,10 @@ async def run_eval_show_mode(
     """Evaluate MapBuilderEstimateNet on holdout data, print scores and show map chart."""
 
     bounding_box = get_bounding_box(region)
+    dataset_id = dataset_builder.get_dataset_id(bounding_box)
+    model_id = map_builder.get_model_id(dataset_id)
     repo_models = RepositoryModels.get_instance()
-    model_data = repo_models.get_model(map_builder.name, **map_builder.get_model_cache_params())
+    model_data = repo_models.get_model(map_builder.name, model_id)
     if model_data is None:
         raise FileNotFoundError(f"Model not found in RepositoryModels for {map_builder.name}. Run train mode first.")
 
@@ -515,9 +533,9 @@ async def run_eval_show_mode(
     climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bounding_box, verbose=True)
     train_climbs, holdout_climbs = dataset_builder.split_climbs(climbs)
     holdout_df = _climbs_to_eval_df(holdout_climbs)
-    maps = map_builder.build(bounding_box, ignore_cache=True)
+    maps = map_builder.build(bounding_box, ignore_cache=True, model_id=model_id)
     vma = maps["strength"]
-    eval_result = map_builder.evaluate(bounding_box, holdout_df)
+    eval_result = map_builder.evaluate(bounding_box, holdout_df, model_id=model_id)
     print("\n" + "=" * 60)
     print(f"Map evaluation (n_train={len(train_climbs)}, n_holdout={len(holdout_climbs)})")
     print("=" * 60)
@@ -525,6 +543,9 @@ async def run_eval_show_mode(
     print("=" * 60 + "\n")
 
     from paraai.map.show_climb_map import show_map_eval
+
+    save_dir = Path("data", "plots")
+    save_path = save_dir / f"eval_{region}.png"
 
     terrain = RepositoryTerrain.get_instance().get_elevation(bounding_box)
     elevation = terrain["elevation"].astype(np.float32)
@@ -535,7 +556,11 @@ async def run_eval_show_mode(
         column_name="strength",
         title=f"MapBuilderEstimate: {region}",
         elevation=elevation,
+        save_path=save_path,
     )
+
+    log_path = RepositoryTrainLogs.get_instance().get_log_path(map_builder.name, model_id)
+    _plot_all_training_results(log_path if log_path.exists() else None)
 
 
 def parse_args() -> argparse.Namespace:
@@ -546,9 +571,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["dataset", "train", "estimate", "eval", "train_eval", "eval_show", "show_patch"],
+        choices=["dataset", "train", "estimate", "eval", "train_eval", "eval_show", "show_patch", "show_plots"],
         default="estimate",
-        help="dataset: build and save dataset; train: load dataset, train, save model; estimate: load model, produce map (default); eval: evaluate on holdout (requires trained model); train_eval: train then evaluate on test patches (no map); eval_show: evaluate and show map chart; show_patch: show two random patches from training set",
+        help="dataset: build dataset; train: train model; estimate: produce map (default); eval: evaluate on holdout; train_eval: train then evaluate; eval_show: evaluate, show map and training curves; show_patch: show two patches; show_plots: show all training curves",
     )
     parser.add_argument("--region", type=str, default="sopot", help="Region (bassano, sopot, bansko, europe)")
     parser.add_argument(
@@ -566,16 +591,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument(
         "--dataset-type",
-        choices=["climb", "centre"],
+        choices=["climb", "centre", "flat_seed"],
         default="climb",
-        help="climb: one point per climb; centre: add zero-climb points between consecutive climbs in same tracklog",
+        help="climb: one point per climb; centre: add zero-climb between climbs; flat_seed: remove climbs in flatlands, seed 0-climb from flatlands",
     )
+    parser.add_argument("--flatland-radius-m", type=float, default=200.0, help="Radius for flatland planarity (flat_seed mode)")
+    parser.add_argument("--flat-seed-planarity-threshold", type=float, default=0.5, help="Planarity > threshold = flatland (flat_seed mode)")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO")
-    return parser.parse_args()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+    return args
 
 
 def create_dataset_builder(
-    dataset_builder_type: Literal["climb", "centre"],
+    dataset_builder_type: Literal["climb", "centre", "flat_seed"],
     *,
     patch_size_m: float = 500.0,
     image_size: int = 64,
@@ -583,6 +613,8 @@ def create_dataset_builder(
     test_frac: float = 0.2,
     split_seed: int = 42,
     builder_name: str = "MapEstimateDataset",
+    flatland_radius_m: float = 200.0,
+    flat_seed_planarity_threshold: float = 0.5,
 ) -> DatasetBuilder:
     """Create dataset builder from type and common params."""
     return DatasetBuilder(
@@ -593,17 +625,22 @@ def create_dataset_builder(
         test_frac=test_frac,
         split_seed=split_seed,
         builder_name=builder_name,
+        flatland_radius_m=flatland_radius_m,
+        flat_seed_planarity_threshold=flat_seed_planarity_threshold,
     )
 
 
 def create_map_builder(
     map_builder_type: Literal["simple", "time"],
+    *,
+    epochs: int = 5,
+    lr: float = 1e-3,
 ) -> MapBuilderEstimateSimple | MapBuilderEstimateTime:
     """Create map builder from type and common params."""
     if map_builder_type == "simple":
-        return MapBuilderEstimateSimple()
+        return MapBuilderEstimateSimple(epochs=epochs, lr=lr)
     if map_builder_type == "time":
-        return MapBuilderEstimateTime()
+        return MapBuilderEstimateTime(epochs=epochs, lr=lr)
     raise ValueError(f"Unknown map builder type: {map_builder_type}")
 
 
@@ -613,7 +650,11 @@ if __name__ == "__main__":
     setup()
     region = args.region
 
-    map_builder = create_map_builder(args.estimator_type)
+    map_builder = create_map_builder(
+        args.estimator_type,
+        epochs=args.epochs,
+        lr=args.lr,
+    )
     dataset_builder = create_dataset_builder(
         args.dataset_type,
         patch_size_m=args.patch_size_m,
@@ -622,6 +663,8 @@ if __name__ == "__main__":
         test_frac=args.test_frac,
         split_seed=args.split_seed,
         builder_name=map_builder.name,
+        flatland_radius_m=args.flatland_radius_m,
+        flat_seed_planarity_threshold=args.flat_seed_planarity_threshold,
     )
     if args.mode == "show_patch":
         asyncio.run(run_show_patch_mode(region, dataset_builder, map_builder))
@@ -637,5 +680,7 @@ if __name__ == "__main__":
         asyncio.run(run_train_eval_mode(region, dataset_builder, map_builder))
     elif args.mode == "eval_show":
         asyncio.run(run_eval_show_mode(region, dataset_builder, map_builder))
+    elif args.mode == "show_plots":
+        _plot_all_training_results(None)
     else:
         raise ValueError(f"Unknown mode: {args.mode}")

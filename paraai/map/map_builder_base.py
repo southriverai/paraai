@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from abc import abstractmethod
 from dataclasses import dataclass
@@ -49,15 +47,8 @@ class MapBuilderBase:
         self.output_map_names = output_map_names
 
     @abstractmethod
-    def get_cache_params(self) -> dict:
-        """Parameters that affect cache identity. Override in subclasses."""
-        raise NotImplementedError("Subclasses must implement get_cache_params")
-
     def get_builder_id(self) -> str:
-        """Builder identity string for cache keying. Override for custom logic."""
-        params = self.get_cache_params()
-        s = json.dumps(params, sort_keys=True, default=str)
-        return hashlib.sha256(s.encode()).hexdigest()[:16]
+        pass
 
     def build(
         self,

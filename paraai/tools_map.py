@@ -20,14 +20,14 @@ def _map_cache_hash(
     generator_name: str,
     map_name: str,
     bounding_box: BoundingBox,
-    params: dict,
+    builder_id: str,
 ) -> str:
     """Hash for cache key: generator + map_name + bbox + params."""
     data = {
         "generator": generator_name,
         "map": map_name,
         "bbox": [bounding_box.lat_min, bounding_box.lat_max, bounding_box.lon_min, bounding_box.lon_max],
-        "params": dict(sorted(params.items())),
+        "builder_id": builder_id,
     }
     s = json.dumps(data, sort_keys=True, default=str)
     return hashlib.sha256(s.encode()).hexdigest()[:16]
@@ -37,15 +37,15 @@ def save_map(
     vma: VectorMapArray,
     cache_dir: Path,
     generator_name: str,
-    map_name: str | None = None,
-    bounding_box: BoundingBox | None = None,
-    **params: object,
+    map_name: str,
+    bounding_box: BoundingBox,
+    builder_id: str,
 ) -> Path:
     """Save VectorMapArray to cache. Returns path to saved file."""
     bbox = bounding_box if bounding_box is not None else vma.bounding_box
     map_name = map_name or vma.map_name
 
-    h = _map_cache_hash(generator_name, map_name, bbox, params)
+    h = _map_cache_hash(generator_name, map_name, bbox, builder_id)
     cache_dir = Path(cache_dir)
     safe_gen = str(generator_name).replace(" ", "_").replace(":", "_")
     safe_map = str(map_name).replace(" ", "_")
@@ -64,10 +64,10 @@ def load_map(
     generator_name: str,
     map_name: str,
     bounding_box: BoundingBox,
-    **params: object,
+    builder_id: str,
 ) -> VectorMapArray | None:
     """Load VectorMapArray from cache if exists. Returns None if not cached."""
-    h = _map_cache_hash(generator_name, map_name, bounding_box, params)
+    h = _map_cache_hash(generator_name, map_name, bounding_box, builder_id)
     cache_dir = Path(cache_dir)
     safe_gen = str(generator_name).replace(" ", "_").replace(":", "_")
     safe_map = str(map_name).replace(" ", "_")

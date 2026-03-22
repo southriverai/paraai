@@ -61,6 +61,10 @@ class RepositoryTrainLogs:
         safe_builder = str(builder_name).replace(" ", "_").replace(":", "_")
         return self.cache_dir / safe_builder / f"{cache_id}.json"
 
+    def get_log_path(self, builder_name: str, model_id: str) -> Path:
+        """Return path to train log for given builder and model_id."""
+        return self._path(builder_name, model_id)
+
     def list_train_logs(self, builder_name: str | None = None) -> list[Path]:
         """List all train log files. If builder_name given, filter to that builder."""
         if builder_name is not None:

@@ -36,7 +36,7 @@ class RepositoryMaps:
         generator_name: str,
         map_name: str,
         bounding_box: BoundingBox,
-        **params: object,
+        builder_id: str,
     ) -> VectorMapArray | None:
         """Load map from cache if it exists."""
         return load_map(
@@ -44,7 +44,7 @@ class RepositoryMaps:
             generator_name,
             map_name,
             bounding_box,
-            **params,
+            builder_id,
         )
 
     def save_map(

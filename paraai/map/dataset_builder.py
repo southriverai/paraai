@@ -6,9 +6,13 @@ import logging
 import random
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from paraai.map.vectror_map_array import VectorMapArray
+
 import pandas as pd
 import rasterio
 import torch
@@ -128,7 +132,7 @@ class DatasetBuilder:
 
     def __init__(
         self,
-        dataset_builder_type: Literal["climb", "centre"],
+        dataset_builder_type: Literal["climb", "centre", "flat_seed"],
         patch_size_m: float = 500.0,
         image_size: int = 64,
         grid_stride: int = 16,
@@ -136,8 +140,12 @@ class DatasetBuilder:
         split_seed: int = 42,
         *,
         builder_name: str = "MapEstimateDataset",
+        flatland_radius_m: float = 200.0,
+        flat_seed_planarity_threshold: float = 0.5,
+        flat_seed_stride: int = 16,
     ) -> None:
-        """Initialize DatasetBuilder with type, patch size, image size, grid stride, test fraction, and split seed."""
+        """Initialize DatasetBuilder with type, patch size, image size, grid stride, test fraction, and split seed.
+        For flat_seed: flatland_radius_m, flat_seed_planarity_threshold (planarity > = flatland), flat_seed_stride (pixel stride for sampling)."""
 
         validate_safe_name(builder_name)
         self.builder_name = builder_name
@@ -147,10 +155,13 @@ class DatasetBuilder:
         self.grid_stride = grid_stride
         self.test_frac = test_frac
         self.split_seed = split_seed
+        self.flatland_radius_m = flatland_radius_m
+        self.flat_seed_planarity_threshold = flat_seed_planarity_threshold
+        self.flat_seed_stride = flat_seed_stride
 
     def get_dataset_id(self, bounding_box: BoundingBox) -> str:
         """Params for dataset cache key (includes split params and dataset_builder_type)."""
-        return dict_to_cache_id(
+        params: dict = dict(
             builder_name=self.builder_name,
             dataset_builder_type=self.dataset_builder_type,
             patch_size_m=self.patch_size_m,
@@ -160,6 +171,11 @@ class DatasetBuilder:
             split_seed=self.split_seed,
             bbox=[bounding_box.lat_min, bounding_box.lat_max, bounding_box.lon_min, bounding_box.lon_max],
         )
+        if self.dataset_builder_type == "flat_seed":
+            params["flatland_radius_m"] = self.flatland_radius_m
+            params["flat_seed_planarity_threshold"] = self.flat_seed_planarity_threshold
+            params["flat_seed_stride"] = self.flat_seed_stride
+        return dict_to_cache_id(**params)
 
     @staticmethod
     def _alt_norm(alt_m: float) -> float:
@@ -234,7 +250,46 @@ class DatasetBuilder:
             return self._expand_climbs_mode_climb(climbs)
         if self.dataset_builder_type == "centre":
             return self._expand_climbs_mode_centre(climbs)
+        if self.dataset_builder_type == "flat_seed":
+            return self._expand_climbs_mode_climb(climbs)
         raise ValueError(f"Unknown dataset_builder_type: {self.dataset_builder_type!r}")
+
+    def _sample_flatland_points(
+        self,
+        planarity_vma: VectorMapArray,
+        elevation: np.ndarray,
+        transform: rasterio.Affine,
+        strength_lo: float,
+        strength_hi: float,
+    ) -> pd.DataFrame:
+        """Sample 0-climb points from flatland pixels (planarity > threshold)."""
+        planarity = planarity_vma.array
+        h, w = planarity.shape
+        stride = self.flat_seed_stride
+        thresh = self.flat_seed_planarity_threshold
+
+        rows: list[dict] = []
+        for r in range(0, h, stride):
+            for c in range(0, w, stride):
+                if planarity[r, c] <= thresh:
+                    continue
+                lon, lat = rasterio.transform.xy(transform, r, c)
+                lat, lon = float(lat), float(lon)
+                elev_val = float(np.nan_to_num(elevation[r, c], nan=0.0))
+                alt_norm = self._alt_norm(elev_val)
+                rows.append(
+                    {
+                        "ground_lat": lat,
+                        "ground_lon": lon,
+                        "climb_strength_m_s": 0.0,
+                        "time_of_day_h": 12.0,
+                        "time_of_year_d": 182.5,
+                        "ground_alt_norm": alt_norm,
+                        "start_alt_norm": alt_norm,
+                        "end_alt_norm": alt_norm,
+                    }
+                )
+        return pd.DataFrame(rows)
 
     def split_climbs(
         self,
@@ -367,6 +422,93 @@ class DatasetBuilder:
             transform=transform,
         )
 
+    def _build_dataset_flat_seed(
+        self,
+        bounding_box: BoundingBox,
+        climbs: list[SimpleClimb],
+    ) -> tuple[MapEstimateDatasetResult, MapEstimateDatasetResult, int]:
+        """Build dataset for flat_seed: remove climbs in flatlands, seed 0-climb points from flatlands."""
+        from paraai.map.map_builder_flatland_torch import MapBuilderFlatlandTorch
+
+        builder_flatland = MapBuilderFlatlandTorch(radius_m=self.flatland_radius_m)
+        flatland_maps = builder_flatland.build(bounding_box, None)
+        planarity_vma = flatland_maps["planarity"]
+
+        lats = [c.ground_lat for c in climbs]
+        lons = [c.ground_lon for c in climbs]
+        planarity_at_climbs = planarity_vma.get_values(lats, lons)
+        thresh = self.flat_seed_planarity_threshold
+        climbs_filtered = [c for i, c in enumerate(climbs) if planarity_at_climbs[i] <= thresh]
+        removed = len(climbs) - len(climbs_filtered)
+        if removed > 0:
+            logger.info(
+                "flat_seed: removed %d climbs in flatlands (planarity > %.2f), keeping %d",
+                removed,
+                thresh,
+                len(climbs_filtered),
+            )
+        if len(climbs_filtered) < 2:
+            raise ValueError(
+                f"flat_seed: need at least 2 climbs after filtering flatlands, got {len(climbs_filtered)}. "
+                "Try lowering flat_seed_planarity_threshold."
+            )
+
+        train_climbs, test_climbs = self.split_climbs(climbs_filtered)
+        train_result, test_result, n_zero_climb = self.build(bounding_box, train_climbs, test_climbs)
+
+        repo_terrain = RepositoryTerrain.get_instance()
+        terrain = repo_terrain.get_elevation(bounding_box)
+        elevation = terrain["elevation"]
+        transform = terrain["transform"]
+
+        flatland_df = self._sample_flatland_points(
+            planarity_vma, elevation, transform, train_result.strength_lo, train_result.strength_hi
+        )
+        if len(flatland_df) > 0:
+            indices = np.arange(len(flatland_df))
+            rng = random.Random(self.split_seed)
+            rng.shuffle(indices)
+            n_test_flat = max(0, int(len(flatland_df) * self.test_frac))
+            n_train_flat = len(flatland_df) - n_test_flat
+            train_flat_df = flatland_df.iloc[indices[:n_train_flat]]
+            test_flat_df = flatland_df.iloc[indices[n_train_flat:]]
+
+            flat_train = self._build_from_points(
+                train_flat_df, elevation, transform,
+                train_result.strength_lo, train_result.strength_hi, "Flatland train",
+            )
+            flat_test = self._build_from_points(
+                test_flat_df, elevation, transform,
+                train_result.strength_lo, train_result.strength_hi, "Flatland test",
+            )
+
+            def _merge(a: MapEstimateDatasetResult, b: MapEstimateDatasetResult) -> MapEstimateDatasetResult:
+                return MapEstimateDatasetResult(
+                    input_maps=a.input_maps + b.input_maps,
+                    target_maps=a.target_maps + b.target_maps,
+                    time_of_day=a.time_of_day + b.time_of_day,
+                    time_of_year=a.time_of_year + b.time_of_year,
+                    ground_alt=a.ground_alt + b.ground_alt,
+                    start_alt=a.start_alt + b.start_alt,
+                    end_alt=a.end_alt + b.end_alt,
+                    lats=a.lats + b.lats,
+                    lons=a.lons + b.lons,
+                    strength_lo=a.strength_lo,
+                    strength_hi=a.strength_hi,
+                    elevation=a.elevation,
+                    transform=a.transform,
+                )
+
+            train_result = _merge(train_result, flat_train)
+            test_result = _merge(test_result, flat_test)
+            n_zero_climb += len(flatland_df)
+            logger.info(
+                "flat_seed: added %d flatland 0-climb points (%d train, %d test)",
+                len(flatland_df), n_train_flat, n_test_flat,
+            )
+
+        return train_result, test_result, n_zero_climb
+
     async def build_dataset(
         self,
         bounding_box: BoundingBox,
@@ -392,9 +534,12 @@ class DatasetBuilder:
         climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bounding_box, verbose=True)
         if len(climbs) < 2:
             raise ValueError(f"Need at least 2 SimpleClimbs in region, got {len(climbs)}")
-        train_climbs, test_climbs = self.split_climbs(climbs)
 
-        train_result, test_result, n_zero_climb = self.build(bounding_box, train_climbs, test_climbs)
+        if self.dataset_builder_type == "flat_seed":
+            train_result, test_result, n_zero_climb = self._build_dataset_flat_seed(bounding_box, climbs)
+        else:
+            train_climbs, test_climbs = self.split_climbs(climbs)
+            train_result, test_result, n_zero_climb = self.build(bounding_box, train_climbs, test_climbs)
         data: dict = {
             "input_maps_train": train_result.input_maps,
             "target_maps_train": train_result.target_maps,

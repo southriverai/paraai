@@ -54,13 +54,11 @@ class MapBuilderEstimateTime(MapBuilderEstimateBase):
         time_day_norm: torch.Tensor | None = None,
         time_year_norm: torch.Tensor | None = None,
         ground_alt_norm: torch.Tensor | None = None,
-        start_alt_norm: torch.Tensor | None = None,
-        end_alt_norm: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Pass time and altitude into dense layer."""
+        """Pass time and ground altitude into dense layer."""
         if time_day_norm is None or time_year_norm is None or ground_alt_norm is None:
-            raise ValueError("MapEstimateNetTime requires time and altitude")
-        return model(batch, time_day_norm, time_year_norm, ground_alt_norm, start_alt_norm, end_alt_norm)
+            raise ValueError("MapEstimateNetTime requires time and ground altitude")
+        return model(batch, time_day_norm, time_year_norm, ground_alt_norm)
 
     def _run_inference_on_points(
         self,
@@ -68,8 +66,8 @@ class MapBuilderEstimateTime(MapBuilderEstimateBase):
         df: pd.DataFrame,
         model_id: str,
     ) -> np.ndarray:
-        """Run model inference on (lat, lon) points. Requires time and altitude columns in df."""
-        required = ["time_of_day_h", "time_of_year_d", "ground_alt_norm", "start_alt_norm", "end_alt_norm"]
+        """Run model inference on (lat, lon) points. Requires time and ground_alt_norm columns in df."""
+        required = ["time_of_day_h", "time_of_year_d", "ground_alt_norm"]
         for col in required:
             if col not in df.columns:
                 raise ValueError(f"df must have column '{col}'")
@@ -115,11 +113,9 @@ class MapBuilderEstimateTime(MapBuilderEstimateBase):
         td_t = torch.from_numpy(np.clip(df["time_of_day_h"].to_numpy() / 24.0, 0.0, 1.0).astype(np.float32)).to(device)
         ty_t = torch.from_numpy(np.clip(df["time_of_year_d"].to_numpy() / 365.0, 0.0, 1.0).astype(np.float32)).to(device)
         ga_t = torch.from_numpy(df["ground_alt_norm"].to_numpy().astype(np.float32)).to(device)
-        sa_t = torch.from_numpy(df["start_alt_norm"].to_numpy().astype(np.float32)).to(device)
-        ea_t = torch.from_numpy(df["end_alt_norm"].to_numpy().astype(np.float32)).to(device)
 
         with torch.no_grad():
-            pred = self._model_forward(model, inp, td_t, ty_t, ga_t, sa_t, ea_t)
+            pred = self._model_forward(model, inp, td_t, ty_t, ga_t)
         pred_np = pred.cpu().numpy().flatten()
         return np.clip(pred_np, 0, 1) * (strength_hi - strength_lo) + strength_lo
 
@@ -134,7 +130,6 @@ class MapBuilderEstimateTime(MapBuilderEstimateBase):
         time_of_year_d = inference_params.get("time_of_year_d", 182.5)
         time_day_norm = float(np.clip(time_of_day_h / 24.0, 0.0, 1.0))
         time_year_norm = float(np.clip(time_of_year_d / 365.0, 0.0, 1.0))
-
         repo_models = RepositoryModels.get_instance()
         model_data = repo_models.get_model(self.name, model_id)
         if model_data is None:
@@ -179,10 +174,7 @@ class MapBuilderEstimateTime(MapBuilderEstimateBase):
                 for ci, c in enumerate(range(0, w, stride)):
                     lon, lat = rasterio.transform.xy(transform, r, c)
                     elev_val = float(np.nan_to_num(elevation[r, c], nan=0.0))
-                    alt_n = _alt_norm(elev_val)
-                    ga_t = torch.tensor([alt_n], dtype=torch.float32, device=device)
-                    sa_t = ga_t
-                    ea_t = ga_t
+                    ga_t = torch.tensor([_alt_norm(elev_val)], dtype=torch.float32, device=device)
                     patch = extract_elevation_patch(
                         elevation,
                         transform,
@@ -192,7 +184,7 @@ class MapBuilderEstimateTime(MapBuilderEstimateBase):
                         image_size,
                     )
                     patch_batch = patch.unsqueeze(0).to(device)
-                    pred = self._model_forward(model, patch_batch, td_t, ty_t, ga_t, sa_t, ea_t)
+                    pred = self._model_forward(model, patch_batch, td_t, ty_t, ga_t)
                     val = pred[0, 0].item()
                     pred_sparse[ri, ci] = val
 

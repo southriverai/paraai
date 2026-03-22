@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import random
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
@@ -26,6 +27,7 @@ def show_map_eval(
     title: str | None = None,
     show_random_points: bool = True,
     elevation: np.ndarray | None = None,
+    save_path: Path | str | None = None,
 ) -> None:
     """Scatter plot of map predicted values vs holdout dataframe values, plus vector map."""
     if holdout_df.empty or column_name not in holdout_df.columns:
@@ -91,6 +93,10 @@ def show_map_eval(
     if title:
         fig.suptitle(title)
     plt.tight_layout()
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        logger.info("Saved eval plot to %s", save_path)
     plt.show()
 
 

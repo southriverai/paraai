@@ -68,13 +68,11 @@ class MapBuilderEstimateBase(MapBuilderBase):
         time_day_norm: torch.Tensor | None = None,
         time_year_norm: torch.Tensor | None = None,
         ground_alt_norm: torch.Tensor | None = None,
-        start_alt_norm: torch.Tensor | None = None,
-        end_alt_norm: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Override in subclasses for models with different forward signatures."""
         if time_day_norm is None or time_year_norm is None or ground_alt_norm is None:
-            raise ValueError("Model requires time and altitude")
-        return model(batch, time_day_norm, time_year_norm, ground_alt_norm, start_alt_norm, end_alt_norm)
+            raise ValueError("Model requires time and ground altitude")
+        return model(batch, time_day_norm, time_year_norm, ground_alt_norm)
 
     @abstractmethod
     def _run_inference_on_points(
