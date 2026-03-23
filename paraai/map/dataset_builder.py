@@ -138,6 +138,7 @@ class DatasetBuilder:
         grid_stride: int = 16,
         test_frac: float = 0.2,
         split_seed: int = 42,
+        dataset_limit: int = 300_000,
         *,
         builder_name: str = "MapEstimateDataset",
         flatland_radius_m: float = 200.0,
@@ -145,7 +146,8 @@ class DatasetBuilder:
         flat_seed_stride: int = 16,
     ) -> None:
         """Initialize DatasetBuilder with type, patch size, image size, grid stride, test fraction, and split seed.
-        For flat_seed: flatland_radius_m, flat_seed_planarity_threshold (planarity > = flatland), flat_seed_stride (pixel stride for sampling)."""
+        For flat_seed: flatland_radius_m, flat_seed_planarity_threshold (planarity > = flatland), flat_seed_stride (pixel stride for sampling).
+        dataset_limit: max instances (train+test); excess is randomly sampled down."""
 
         validate_safe_name(builder_name)
         self.builder_name = builder_name
@@ -155,12 +157,14 @@ class DatasetBuilder:
         self.grid_stride = grid_stride
         self.test_frac = test_frac
         self.split_seed = split_seed
+        self.dataset_limit = dataset_limit
         self.flatland_radius_m = flatland_radius_m
         self.flat_seed_planarity_threshold = flat_seed_planarity_threshold
         self.flat_seed_stride = flat_seed_stride
 
-    def get_dataset_id(self, bounding_box: BoundingBox) -> str:
+    def get_dataset_id(self, bounding_boxes: BoundingBox | list[BoundingBox]) -> str:
         """Params for dataset cache key (includes split params and dataset_builder_type)."""
+        bbox_list = bounding_boxes if isinstance(bounding_boxes, list) else [bounding_boxes]
         params: dict = dict(
             builder_name=self.builder_name,
             dataset_builder_type=self.dataset_builder_type,
@@ -169,12 +173,13 @@ class DatasetBuilder:
             grid_stride=self.grid_stride,
             test_frac=self.test_frac,
             split_seed=self.split_seed,
-            bbox=[bounding_box.lat_min, bounding_box.lat_max, bounding_box.lon_min, bounding_box.lon_max],
+            bboxes=[[b.lat_min, b.lat_max, b.lon_min, b.lon_max] for b in bbox_list],
         )
         if self.dataset_builder_type == "flat_seed":
             params["flatland_radius_m"] = self.flatland_radius_m
             params["flat_seed_planarity_threshold"] = self.flat_seed_planarity_threshold
             params["flat_seed_stride"] = self.flat_seed_stride
+        params["dataset_limit"] = self.dataset_limit
         return dict_to_cache_id(**params)
 
     @staticmethod
@@ -370,6 +375,124 @@ class DatasetBuilder:
 
         return train_result, test_result, n_zero_climb_total
 
+    def _build_from_multiple_bboxes(
+        self,
+        bounding_boxes: list[BoundingBox],
+        climbs_train: list[SimpleClimb],
+        climbs_test: list[SimpleClimb],
+    ) -> tuple[MapEstimateDatasetResult, MapEstimateDatasetResult, int]:
+        """Build train/test results using per-bbox terrain (no union). Points are grouped by containing bbox."""
+        df_train = self._expand_climbs_to_points(climbs_train)
+        df_test = self._expand_climbs_to_points(climbs_test)
+        n_zero_climb_total = int((df_train["climb_strength_m_s"] == 0).sum() + (df_test["climb_strength_m_s"] == 0).sum())
+
+        strength_vals = df_train["climb_strength_m_s"].to_numpy(dtype=np.float64)
+        valid = strength_vals[~np.isnan(strength_vals) & (strength_vals > 0)]
+        if valid.size > 0:
+            p2, p98 = np.percentile(valid, [2, 98])
+            strength_lo, strength_hi = float(p2), float(p98)
+        else:
+            strength_lo, strength_hi = 0.0, 1.0
+        if strength_hi <= strength_lo:
+            strength_hi = strength_lo + 1e-6
+
+        def _points_in_bbox(df: pd.DataFrame, bbox: BoundingBox) -> pd.DataFrame:
+            mask = df.apply(lambda r: bbox.is_in(r["ground_lat"], r["ground_lon"]), axis=1)
+            return df[mask]
+
+        def _merge_results(a: MapEstimateDatasetResult | None, b: MapEstimateDatasetResult) -> MapEstimateDatasetResult:
+            if a is None or len(a.input_maps) == 0:
+                return b
+            return MapEstimateDatasetResult(
+                input_maps=a.input_maps + b.input_maps,
+                target_maps=a.target_maps + b.target_maps,
+                time_of_day=(a.time_of_day or []) + (b.time_of_day or []),
+                time_of_year=(a.time_of_year or []) + (b.time_of_year or []),
+                ground_alt=a.ground_alt + b.ground_alt,
+                start_alt=a.start_alt + b.start_alt,
+                end_alt=a.end_alt + b.end_alt,
+                lats=a.lats + b.lats,
+                lons=a.lons + b.lons,
+                strength_lo=a.strength_lo,
+                strength_hi=a.strength_hi,
+                elevation=b.elevation,
+                transform=b.transform,
+            )
+
+        train_result: MapEstimateDatasetResult | None = None
+        test_result: MapEstimateDatasetResult | None = None
+        repo_terrain = RepositoryTerrain.get_instance()
+
+        for bbox in bounding_boxes:
+            train_df_b = _points_in_bbox(df_train, bbox)
+            test_df_b = _points_in_bbox(df_test, bbox)
+            if len(train_df_b) == 0 and len(test_df_b) == 0:
+                continue
+            terrain = repo_terrain.get_elevation(bbox)
+            elevation = terrain["elevation"]
+            transform = terrain["transform"]
+            if len(train_df_b) > 0:
+                tr_b = self._build_from_points(
+                    train_df_b, elevation, transform, strength_lo, strength_hi, f"Train patches ({bbox})"
+                )
+                train_result = _merge_results(train_result, tr_b)
+            if len(test_df_b) > 0:
+                te_b = self._build_from_points(
+                    test_df_b, elevation, transform, strength_lo, strength_hi, f"Test patches ({bbox})"
+                )
+                test_result = _merge_results(test_result, te_b)
+
+        if train_result is None or test_result is None:
+            raise ValueError("No climbs in any bounding box")
+        return train_result, test_result, n_zero_climb_total
+
+    @staticmethod
+    def _subsample_result(result: MapEstimateDatasetResult, indices: list[int]) -> MapEstimateDatasetResult:
+        """Return new MapEstimateDatasetResult with only the given indices."""
+        return MapEstimateDatasetResult(
+            input_maps=[result.input_maps[i] for i in indices],
+            target_maps=[result.target_maps[i] for i in indices],
+            time_of_day=[result.time_of_day[i] for i in indices] if result.time_of_day else None,
+            time_of_year=[result.time_of_year[i] for i in indices] if result.time_of_year else None,
+            ground_alt=[result.ground_alt[i] for i in indices],
+            start_alt=[result.start_alt[i] for i in indices],
+            end_alt=[result.end_alt[i] for i in indices],
+            lats=[result.lats[i] for i in indices],
+            lons=[result.lons[i] for i in indices],
+            strength_lo=result.strength_lo,
+            strength_hi=result.strength_hi,
+            elevation=result.elevation,
+            transform=result.transform,
+        )
+
+    def _apply_dataset_limit(
+        self,
+        train_result: MapEstimateDatasetResult,
+        test_result: MapEstimateDatasetResult,
+    ) -> tuple[MapEstimateDatasetResult, MapEstimateDatasetResult]:
+        """Randomly subsample train+test to dataset_limit if total exceeds it."""
+        n_train = len(train_result.input_maps)
+        n_test = len(test_result.input_maps)
+        total = n_train + n_test
+        if total <= self.dataset_limit:
+            return train_result, test_result
+        rng = random.Random(self.split_seed)
+        n_train_new = int(self.dataset_limit * n_train / total)
+        n_test_new = self.dataset_limit - n_train_new
+        if n_test_new <= 0:
+            n_test_new = 1
+            n_train_new = self.dataset_limit - 1
+        train_idx = sorted(rng.sample(range(n_train), n_train_new))
+        test_idx = sorted(rng.sample(range(n_test), n_test_new))
+        logger.info(
+            "Dataset limit %d: randomly sampled from %d to %d train, %d to %d test",
+            self.dataset_limit, n_train, n_train_new, n_test, n_test_new,
+        )
+        return (
+            self._subsample_result(train_result, train_idx),
+            self._subsample_result(test_result, test_idx),
+        )
+
     def _build_from_points(
         self,
         df: pd.DataFrame,
@@ -421,6 +544,102 @@ class DatasetBuilder:
             elevation=elevation,
             transform=transform,
         )
+
+    def _build_dataset_flat_seed_multi(
+        self,
+        bounding_boxes: list[BoundingBox],
+        climbs: list[SimpleClimb],
+    ) -> tuple[MapEstimateDatasetResult, MapEstimateDatasetResult, int]:
+        """Build flat_seed dataset for multiple bboxes: filter flatlands per bbox, build with per-bbox terrain."""
+        from paraai.map.map_builder_flatland_torch import MapBuilderFlatlandTorch
+
+        builder_flatland = MapBuilderFlatlandTorch(radius_m=self.flatland_radius_m)
+        thresh = self.flat_seed_planarity_threshold
+        climbs_filtered: list[SimpleClimb] = []
+        for bbox in bounding_boxes:
+            climbs_in_bbox = [c for c in climbs if bbox.is_in(c.ground_lat, c.ground_lon)]
+            if not climbs_in_bbox:
+                continue
+            flatland_maps = builder_flatland.build(bbox, None)
+            planarity_vma = flatland_maps["planarity"]
+            lats = [c.ground_lat for c in climbs_in_bbox]
+            lons = [c.ground_lon for c in climbs_in_bbox]
+            planarity_at_climbs = planarity_vma.get_values(lats, lons)
+            for i, c in enumerate(climbs_in_bbox):
+                if planarity_at_climbs[i] <= thresh:
+                    climbs_filtered.append(c)
+        climbs_filtered = list({c.simple_climb_id: c for c in climbs_filtered}.values())
+        removed = len(climbs) - len(climbs_filtered)
+        if removed > 0:
+            logger.info(
+                "flat_seed: removed %d climbs in flatlands (planarity > %.2f), keeping %d",
+                removed,
+                thresh,
+                len(climbs_filtered),
+            )
+        if len(climbs_filtered) < 2:
+            raise ValueError(
+                f"flat_seed: need at least 2 climbs after filtering flatlands, got {len(climbs_filtered)}. "
+                "Try lowering flat_seed_planarity_threshold."
+            )
+        train_climbs, test_climbs = self.split_climbs(climbs_filtered)
+        train_result, test_result, n_zero_climb = self._build_from_multiple_bboxes(
+            bounding_boxes, train_climbs, test_climbs
+        )
+        repo_terrain = RepositoryTerrain.get_instance()
+        for bbox in bounding_boxes:
+            flatland_maps = builder_flatland.build(bbox, None)
+            planarity_vma = flatland_maps["planarity"]
+            terrain = repo_terrain.get_elevation(bbox)
+            elevation = terrain["elevation"]
+            transform = terrain["transform"]
+            flatland_df = self._sample_flatland_points(
+                planarity_vma, elevation, transform,
+                train_result.strength_lo, train_result.strength_hi,
+            )
+            if len(flatland_df) == 0:
+                continue
+            indices = np.arange(len(flatland_df))
+            rng = random.Random(self.split_seed)
+            rng.shuffle(indices)
+            n_test_flat = max(0, int(len(flatland_df) * self.test_frac))
+            n_train_flat = len(flatland_df) - n_test_flat
+            train_flat_df = flatland_df.iloc[indices[:n_train_flat]]
+            test_flat_df = flatland_df.iloc[indices[n_train_flat:]]
+            flat_train = self._build_from_points(
+                train_flat_df, elevation, transform,
+                train_result.strength_lo, train_result.strength_hi, "Flatland train",
+            )
+            flat_test = self._build_from_points(
+                test_flat_df, elevation, transform,
+                train_result.strength_lo, train_result.strength_hi, "Flatland test",
+            )
+
+            def _merge(a: MapEstimateDatasetResult, b: MapEstimateDatasetResult) -> MapEstimateDatasetResult:
+                return MapEstimateDatasetResult(
+                    input_maps=a.input_maps + b.input_maps,
+                    target_maps=a.target_maps + b.target_maps,
+                    time_of_day=(a.time_of_day or []) + (b.time_of_day or []),
+                    time_of_year=(a.time_of_year or []) + (b.time_of_year or []),
+                    ground_alt=a.ground_alt + b.ground_alt,
+                    start_alt=a.start_alt + b.start_alt,
+                    end_alt=a.end_alt + b.end_alt,
+                    lats=a.lats + b.lats,
+                    lons=a.lons + b.lons,
+                    strength_lo=a.strength_lo,
+                    strength_hi=a.strength_hi,
+                    elevation=b.elevation,
+                    transform=b.transform,
+                )
+
+            train_result = _merge(train_result, flat_train)
+            test_result = _merge(test_result, flat_test)
+            n_zero_climb += len(flatland_df)
+            logger.info(
+                "flat_seed: added %d flatland 0-climb points from bbox (%d train, %d test)",
+                len(flatland_df), n_train_flat, n_test_flat,
+            )
+        return train_result, test_result, n_zero_climb
 
     def _build_dataset_flat_seed(
         self,
@@ -511,17 +730,18 @@ class DatasetBuilder:
 
     async def build_dataset(
         self,
-        bounding_box: BoundingBox,
+        bounding_boxes: BoundingBox | list[BoundingBox],
         *,
         ignore_cache: bool = False,
     ) -> dict:
         """
         Build dataset with cache support from SimpleClimbs.
-        Cache key is cache_params (test_frac, split_seed, dataset_mode from constructor).
+        For multiple bounding boxes: fetches climbs from each bbox separately (no union), merges, builds with per-bbox terrain.
         """
+        bbox_list = bounding_boxes if isinstance(bounding_boxes, list) else [bounding_boxes]
         repo_simple_climb = RepositorySimpleClimb.get_instance()
         repo_datasets = RepositoryDatasets.get_instance()
-        dataset_id = self.get_dataset_id(bounding_box)
+        dataset_id = self.get_dataset_id(bbox_list)
         if not ignore_cache:
             try:
                 data = repo_datasets.get_dataset(self.builder_name, dataset_id)
@@ -531,15 +751,31 @@ class DatasetBuilder:
                 return data
             except ValueError:
                 pass
-        climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bounding_box, verbose=True)
+
+        all_climbs: list[SimpleClimb] = []
+        seen_ids: set[str] = set()
+        for bbox in bbox_list:
+            climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bbox, verbose=True)
+            for c in climbs:
+                cid = c.simple_climb_id
+                if cid not in seen_ids:
+                    seen_ids.add(cid)
+                    all_climbs.append(c)
+        climbs = all_climbs
         if len(climbs) < 2:
-            raise ValueError(f"Need at least 2 SimpleClimbs in region, got {len(climbs)}")
+            raise ValueError(f"Need at least 2 SimpleClimbs across regions, got {len(climbs)}")
 
         if self.dataset_builder_type == "flat_seed":
-            train_result, test_result, n_zero_climb = self._build_dataset_flat_seed(bounding_box, climbs)
+            train_result, test_result, n_zero_climb = self._build_dataset_flat_seed_multi(bbox_list, climbs)
+        elif len(bbox_list) == 1:
+            train_climbs, test_climbs = self.split_climbs(climbs)
+            train_result, test_result, n_zero_climb = self.build(bbox_list[0], train_climbs, test_climbs)
         else:
             train_climbs, test_climbs = self.split_climbs(climbs)
-            train_result, test_result, n_zero_climb = self.build(bounding_box, train_climbs, test_climbs)
+            train_result, test_result, n_zero_climb = self._build_from_multiple_bboxes(
+                bbox_list, train_climbs, test_climbs
+            )
+        train_result, test_result = self._apply_dataset_limit(train_result, test_result)
         data: dict = {
             "input_maps_train": train_result.input_maps,
             "target_maps_train": train_result.target_maps,
@@ -556,7 +792,7 @@ class DatasetBuilder:
                 "patch_size_m": self.patch_size_m,
                 "grid_stride": self.grid_stride,
                 "dataset_mode": self.dataset_builder_type,
-                "bounding_box": bounding_box.model_dump(),
+                "bounding_boxes": [b.model_dump() for b in bbox_list],
             },
         }
         data["dataset_id"] = dataset_id

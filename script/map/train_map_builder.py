@@ -1,9 +1,9 @@
 """Train a CNN to estimate MapBuilderConvolution(200) strength map from elevation patches.
 
 Modes:
-  dataset    - Build (elevation patches, target maps) from region and save to RepositoryDatasets.
-  train      - Load dataset from RepositoryDatasets (by builder + region + params), train the CNN, save model.
-  estimate   - Load trained model, run inference on region, produce strength map (no evaluation).
+  dataset    - Build (elevation patches, target maps) from regions and save to RepositoryDatasets.
+  train      - Load dataset from RepositoryDatasets (by builder + regions + params), train the CNN, save model.
+  estimate   - Load trained model, run inference on regions, produce strength map (no evaluation).
   eval       - Evaluate on holdout data, print MAE/RMSE to console (requires trained model).
   train_eval - Train model, then evaluate on holdout (inference on test patches only, no map building).
   eval_show  - Evaluate on holdout data, print scores and show map chart.
@@ -11,32 +11,35 @@ Modes:
 
 Usage examples (dataset-type and estimator-type always first):
 
-  # 1. Build dataset for region (saves to RepositoryDatasets cache)
-  python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --mode dataset --region sopot
+  # 1. Build dataset for region(s) (saves to RepositoryDatasets cache)
+  python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --mode dataset --regions sopot
 
-  # 2. Train model (loads dataset from RepositoryDatasets by builder + region + params)
-  python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --mode train --region sopot --epochs 10
+  # 2. Build dataset from multiple regions (climbs from all regions combined)
+  python script/map/train_map_builder.py --dataset-type climb --mode dataset --regions sopot,bassano
 
-  # 3. Estimate strength map (default mode, cached by MapBuilderBase)
-  python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --region sopot
+  # 3. Train model (loads dataset from RepositoryDatasets by builder + regions + params)
+  python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --mode train --regions sopot --epochs 10
 
-  # 4. Evaluate on holdout data (print scores only)
-  python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --mode eval --region sopot
+  # 4. Estimate strength map (default mode, cached by MapBuilderBase)
+  python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --regions sopot
 
-  # 5. Train then evaluate (no pre-trained model needed)
-  python script/map/train_map_builder.py --dataset-type climb --estimator-type time --mode train_eval --region sopot
+  # 5. Evaluate on holdout data (print scores only)
+  python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --mode eval --regions sopot
 
-  # 6. Evaluate and show map chart
-  python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --mode eval_show --region sopot
+  # 6. Train then evaluate (no pre-trained model needed)
+  python script/map/train_map_builder.py --dataset-type climb --estimator-type time --mode train_eval --regions sopot
 
-  # 7. Show two random elevation patches from the training set
-  python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --mode show_patch --region sopot
+  # 7. Evaluate and show map chart
+  python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --mode eval_show --regions sopot
 
-  # 8. Show all training curves from repository
+  # 8. Show two random elevation patches from the training set
+  python script/map/train_map_builder.py --dataset-type climb --estimator-type simple --mode show_patch --regions sopot
+
+  # 9. Show all training curves from repository
   python script/map/train_map_builder.py --mode show_plots
 
-  # 9. Build dataset with flat_seed (remove climbs in flatlands, add 0-climb from flatlands)
-  python script/map/train_map_builder.py --dataset-type flat_seed --estimator-type time --mode dataset --region sopot
+  # 10. Build dataset with flat_seed (remove climbs in flatlands, add 0-climb from flatlands)
+  python script/map/train_map_builder.py --dataset-type flat_seed --estimator-type time --mode dataset --regions sopot
 """
 
 from __future__ import annotations
@@ -106,15 +109,14 @@ def _climbs_to_eval_df(climbs: list[SimpleClimb]) -> pd.DataFrame:
 
 
 async def run_dataset_mode(
-    region: str,
+    regions: list[str],
     dataset_builder: DatasetBuilder,
     map_builder: MapBuilderEstimateBase,
 ) -> None:
-    """Build dataset from region and save to RepositoryDatasets cache."""
-    bounding_box = get_bounding_box(region)
-
+    """Build dataset from multiple regions (climbs fetched per bbox, no union)."""
+    bounding_boxes = [get_bounding_box(r) for r in regions]
     data = await dataset_builder.build_dataset(
-        bounding_box,
+        bounding_boxes,
         ignore_cache=True,
     )
 
@@ -170,15 +172,15 @@ def _plot_all_training_results(current_log_path: Path | None = None) -> None:
 
 
 async def run_train_mode(
-    region: str,
+    regions: list[str],
     dataset_builder: DatasetBuilder,
     map_builder: MapBuilderEstimateBase,
 ) -> str:
-    """Load dataset from RepositoryDatasets (or build from region if missing), train model, save model."""
+    """Load dataset from RepositoryDatasets (or build from regions if missing), train model, save model."""
     repo_models = RepositoryModels.get_instance()
-    bounding_box = get_bounding_box(region)
+    bounding_boxes = [get_bounding_box(r) for r in regions]
     data = await dataset_builder.build_dataset(
-        bounding_box,
+        bounding_boxes,
     )
     dataset_id = data["dataset_id"]
     model_id = map_builder.get_model_id(dataset_id)
@@ -304,7 +306,7 @@ async def run_train_mode(
                 "total_time_s": float(elapsed),
             }
         )
-        train_log = TrainLog(region=region, builder_name=map_builder.name, epochs=training_metrics)
+        train_log = TrainLog(region=",".join(regions), builder_name=map_builder.name, epochs=training_metrics)
         log_path = repo_train_logs.save_train_log(map_builder.name, model_id, train_log)
 
         eta_sec = (elapsed / (epoch + 1)) * (map_builder.epochs - epoch - 1) if epoch < map_builder.epochs - 1 else 0
@@ -323,7 +325,7 @@ async def run_train_mode(
             logger.info("Training interrupted by user.")
             if best_state is not None:
                 model.load_state_dict(best_state)
-            train_log = TrainLog(region=region, builder_name=map_builder.name, epochs=training_metrics)
+            train_log = TrainLog(region=",".join(regions), builder_name=map_builder.name, epochs=training_metrics)
             log_path = repo_train_logs.save_train_log(map_builder.name, model_id, train_log)
             repo_models.save_model(
                 map_builder.name,
@@ -344,7 +346,7 @@ async def run_train_mode(
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    train_log = TrainLog(region=region, builder_name=map_builder.name, epochs=training_metrics)
+    train_log = TrainLog(region=",".join(regions), builder_name=map_builder.name, epochs=training_metrics)
     log_path = repo_train_logs.save_train_log(map_builder.name, model_id, train_log)
 
     repo_models.save_model(
@@ -365,17 +367,18 @@ async def run_train_mode(
 
 
 async def run_show_patch_mode(
-    region: str,
+    regions: list[str],
     dataset_builder: DatasetBuilder,
     map_builder: MapBuilderEstimateBase,
 ) -> None:
-    """Show elevation map with patch locations, and two random patches in separate charts."""
+    """Show elevation map with patch locations, and two random patches in separate charts. Uses first region."""
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
 
-    bounding_box = get_bounding_box(region)
+    bounding_boxes = [get_bounding_box(r) for r in regions]
+    bounding_box = bounding_boxes[0]
     data = await dataset_builder.build_dataset(
-        bounding_box,
+        bounding_boxes,
     )
 
     input_maps_train = data["input_maps_train"]
@@ -386,11 +389,13 @@ async def run_show_patch_mode(
     patch_size_m = meta["patch_size_m"]
 
     n = len(input_maps_train)
-    if n < 2:
-        raise ValueError(f"Need at least 2 training patches, got {n}")
-
+    in_first_region = [i for i in range(n) if bounding_box.is_in(lats_train[i], lons_train[i])]
+    if len(in_first_region) < 2:
+        raise ValueError(
+            f"Need at least 2 training patches in first region for show_patch, got {len(in_first_region)}"
+        )
     rng = np.random.default_rng(dataset_builder.split_seed)
-    indices = rng.choice(n, size=2, replace=False)
+    indices = rng.choice(in_first_region, size=2, replace=False)
 
     # Load elevation for the full map
     repo_terrain = RepositoryTerrain.get_instance()
@@ -445,38 +450,46 @@ async def run_show_patch_mode(
 
 
 async def run_estimate_mode(
-    region: str,
+    regions: list[str],
     dataset_builder: DatasetBuilder,
     map_builder: MapBuilderEstimateBase,
 ) -> None:
-    """Load trained model from RepositoryModels, run inference on region, cache strength map."""
+    """Load trained model from RepositoryModels, run inference per region, cache strength map."""
 
-    bounding_box = get_bounding_box(region)
+    bounding_boxes = [get_bounding_box(r) for r in regions]
     repo_models = RepositoryModels.get_instance()
-    dataset_id = dataset_builder.get_dataset_id(bounding_box)
+    dataset_id = dataset_builder.get_dataset_id(bounding_boxes)
     model_id = map_builder.get_model_id(dataset_id)
     model_data = repo_models.get_model(map_builder.name, model_id)
     if model_data is None:
         raise FileNotFoundError(f"Model not found in RepositoryModels for {map_builder.name}. Run train mode first.")
 
-    map_builder.build(bounding_box, ignore_cache=True, model_id=model_id)
-    logger.info("Built and cached strength map")
+    for bbox in bounding_boxes:
+        map_builder.build(bbox, ignore_cache=True, model_id=model_id)
+    logger.info("Built and cached strength maps for %d regions", len(bounding_boxes))
 
 
 async def run_train_eval_mode(
-    region: str,
+    regions: list[str],
     dataset_builder: DatasetBuilder,
     map_builder: MapBuilderEstimateBase,
 ) -> None:
     """Train model, then evaluate on holdout. No map building - inference on test patches only."""
-    model_id = await run_train_mode(region, dataset_builder, map_builder)
-    bounding_box = get_bounding_box(region)
+    model_id = await run_train_mode(regions, dataset_builder, map_builder)
+    bounding_boxes = [get_bounding_box(r) for r in regions]
     repo_simple_climb = RepositorySimpleClimb.get_instance()
-    climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bounding_box, verbose=True)
-    train_climbs, holdout_climbs = dataset_builder.split_climbs(climbs)
+    all_climbs: list[SimpleClimb] = []
+    seen: set[str] = set()
+    for bbox in bounding_boxes:
+        climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bbox, verbose=True)
+        for c in climbs:
+            if c.simple_climb_id not in seen:
+                seen.add(c.simple_climb_id)
+                all_climbs.append(c)
+    train_climbs, holdout_climbs = dataset_builder.split_climbs(all_climbs)
     holdout_df = _climbs_to_eval_df(holdout_climbs)
-    eval_result = map_builder.evaluate(
-        bounding_box=bounding_box,
+    eval_result = map_builder.evaluate_multi_bbox(
+        bounding_boxes,
         evaluate_df=holdout_df,
         model_id=model_id,
     )
@@ -488,14 +501,14 @@ async def run_train_eval_mode(
 
 
 async def run_eval_mode(
-    region: str,
+    regions: list[str],
     dataset_builder: DatasetBuilder,
     map_builder: MapBuilderEstimateBase,
 ) -> None:
     """Evaluate on holdout data, print MAE/RMSE to console (requires trained model)."""
 
-    bounding_box = get_bounding_box(region)
-    dataset_id = dataset_builder.get_dataset_id(bounding_box)
+    bounding_boxes = [get_bounding_box(r) for r in regions]
+    dataset_id = dataset_builder.get_dataset_id(bounding_boxes)
     model_id = map_builder.get_model_id(dataset_id)
     repo_models = RepositoryModels.get_instance()
     model_data = repo_models.get_model(map_builder.name, model_id)
@@ -503,10 +516,17 @@ async def run_eval_mode(
         raise FileNotFoundError(f"Model not found in RepositoryModels for {map_builder.name}. Run train mode first.")
 
     repo_simple_climb = RepositorySimpleClimb.get_instance()
-    climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bounding_box, verbose=True)
-    train_climbs, holdout_climbs = dataset_builder.split_climbs(climbs)
+    all_climbs: list[SimpleClimb] = []
+    seen: set[str] = set()
+    for bbox in bounding_boxes:
+        climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bbox, verbose=True)
+        for c in climbs:
+            if c.simple_climb_id not in seen:
+                seen.add(c.simple_climb_id)
+                all_climbs.append(c)
+    train_climbs, holdout_climbs = dataset_builder.split_climbs(all_climbs)
     holdout_df = _climbs_to_eval_df(holdout_climbs)
-    eval_result = map_builder.evaluate(bounding_box, holdout_df, model_id=model_id)
+    eval_result = map_builder.evaluate_multi_bbox(bounding_boxes, holdout_df, model_id=model_id)
     print("\n" + "=" * 60)
     print(f"Map evaluation (n_train={len(train_climbs)}, n_holdout={len(holdout_climbs)})")
     print("=" * 60)
@@ -515,14 +535,14 @@ async def run_eval_mode(
 
 
 async def run_eval_show_mode(
-    region: str,
+    regions: list[str],
     dataset_builder: DatasetBuilder,
     map_builder: MapBuilderEstimateBase,
 ) -> None:
-    """Evaluate MapBuilderEstimateNet on holdout data, print scores and show map chart."""
+    """Evaluate MapBuilderEstimateNet on holdout data, print scores and show map chart. Shows first region."""
 
-    bounding_box = get_bounding_box(region)
-    dataset_id = dataset_builder.get_dataset_id(bounding_box)
+    bounding_boxes = [get_bounding_box(r) for r in regions]
+    dataset_id = dataset_builder.get_dataset_id(bounding_boxes)
     model_id = map_builder.get_model_id(dataset_id)
     repo_models = RepositoryModels.get_instance()
     model_data = repo_models.get_model(map_builder.name, model_id)
@@ -530,12 +550,20 @@ async def run_eval_show_mode(
         raise FileNotFoundError(f"Model not found in RepositoryModels for {map_builder.name}. Run train mode first.")
 
     repo_simple_climb = RepositorySimpleClimb.get_instance()
-    climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bounding_box, verbose=True)
-    train_climbs, holdout_climbs = dataset_builder.split_climbs(climbs)
+    all_climbs: list[SimpleClimb] = []
+    seen: set[str] = set()
+    for bbox in bounding_boxes:
+        climbs = await repo_simple_climb.get_all_in_bounding_box_by_ground(bbox, verbose=True)
+        for c in climbs:
+            if c.simple_climb_id not in seen:
+                seen.add(c.simple_climb_id)
+                all_climbs.append(c)
+    train_climbs, holdout_climbs = dataset_builder.split_climbs(all_climbs)
     holdout_df = _climbs_to_eval_df(holdout_climbs)
-    maps = map_builder.build(bounding_box, ignore_cache=True, model_id=model_id)
+    eval_result = map_builder.evaluate_multi_bbox(bounding_boxes, holdout_df, model_id=model_id)
+    bbox_display = bounding_boxes[0]
+    maps = map_builder.build(bbox_display, ignore_cache=True, model_id=model_id)
     vma = maps["strength"]
-    eval_result = map_builder.evaluate(bounding_box, holdout_df, model_id=model_id)
     print("\n" + "=" * 60)
     print(f"Map evaluation (n_train={len(train_climbs)}, n_holdout={len(holdout_climbs)})")
     print("=" * 60)
@@ -545,16 +573,19 @@ async def run_eval_show_mode(
     from paraai.map.show_climb_map import show_map_eval
 
     save_dir = Path("data", "plots")
-    save_path = save_dir / f"eval_{region}.png"
+    save_path = save_dir / f"eval_{'_'.join(regions)}.png"
 
-    terrain = RepositoryTerrain.get_instance().get_elevation(bounding_box)
+    terrain = RepositoryTerrain.get_instance().get_elevation(bbox_display)
     elevation = terrain["elevation"].astype(np.float32)
     elevation = np.nan_to_num(elevation, nan=0.0)
+    holdout_in_bbox = holdout_df[
+        holdout_df.apply(lambda r: bbox_display.is_in(r["lat"], r["lon"]), axis=1)
+    ]
     show_map_eval(
         vma,
-        holdout_df,
+        holdout_in_bbox,
         column_name="strength",
-        title=f"MapBuilderEstimate: {region}",
+        title=f"MapBuilderEstimate: {','.join(regions)}",
         elevation=elevation,
         save_path=save_path,
     )
@@ -575,7 +606,12 @@ def parse_args() -> argparse.Namespace:
         default="estimate",
         help="dataset: build dataset; train: train model; estimate: produce map (default); eval: evaluate on holdout; train_eval: train then evaluate; eval_show: evaluate, show map and training curves; show_patch: show two patches; show_plots: show all training curves",
     )
-    parser.add_argument("--region", type=str, default="sopot", help="Region (bassano, sopot, bansko, europe)")
+    parser.add_argument(
+        "--regions",
+        type=str,
+        default="sopot",
+        help="Comma-separated regions (e.g. sopot,bassano). Dataset uses climbs from union of all bounding boxes.",
+    )
     parser.add_argument(
         "--estimator-type",
         choices=["simple", "time"],
@@ -590,6 +626,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-frac", type=float, default=0.2, help="Fraction for test set")
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument(
+        "--dataset-limit",
+        type=int,
+        default=300_000,
+        help="Max instances (train+test); excess randomly sampled down (default 300000)",
+    )
+    parser.add_argument(
         "--dataset-type",
         choices=["climb", "centre", "flat_seed"],
         default="climb",
@@ -601,6 +643,10 @@ def parse_args() -> argparse.Namespace:
     args, unknown = parser.parse_known_args()
     if unknown:
         parser.error(f"unrecognized arguments: {' '.join(unknown)}")
+    # Parse regions from comma-separated string
+    args.regions = [r.strip() for r in args.regions.split(",") if r.strip()]
+    if not args.regions:
+        parser.error("--regions must specify at least one region")
     return args
 
 
@@ -612,6 +658,7 @@ def create_dataset_builder(
     grid_stride: int = 16,
     test_frac: float = 0.2,
     split_seed: int = 42,
+    dataset_limit: int = 300_000,
     builder_name: str = "MapEstimateDataset",
     flatland_radius_m: float = 200.0,
     flat_seed_planarity_threshold: float = 0.5,
@@ -624,6 +671,7 @@ def create_dataset_builder(
         grid_stride=grid_stride,
         test_frac=test_frac,
         split_seed=split_seed,
+        dataset_limit=dataset_limit,
         builder_name=builder_name,
         flatland_radius_m=flatland_radius_m,
         flat_seed_planarity_threshold=flat_seed_planarity_threshold,
@@ -648,7 +696,7 @@ if __name__ == "__main__":
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level))
     setup()
-    region = args.region
+    regions = args.regions
 
     map_builder = create_map_builder(
         args.estimator_type,
@@ -662,24 +710,25 @@ if __name__ == "__main__":
         grid_stride=args.grid_stride,
         test_frac=args.test_frac,
         split_seed=args.split_seed,
+        dataset_limit=args.dataset_limit,
         builder_name=map_builder.name,
         flatland_radius_m=args.flatland_radius_m,
         flat_seed_planarity_threshold=args.flat_seed_planarity_threshold,
     )
     if args.mode == "show_patch":
-        asyncio.run(run_show_patch_mode(region, dataset_builder, map_builder))
+        asyncio.run(run_show_patch_mode(regions, dataset_builder, map_builder))
     elif args.mode == "dataset":
-        asyncio.run(run_dataset_mode(region, dataset_builder, map_builder))
+        asyncio.run(run_dataset_mode(regions, dataset_builder, map_builder))
     elif args.mode == "train":
-        asyncio.run(run_train_mode(region, dataset_builder, map_builder))
+        asyncio.run(run_train_mode(regions, dataset_builder, map_builder))
     elif args.mode == "estimate":
-        asyncio.run(run_estimate_mode(region, dataset_builder, map_builder))
+        asyncio.run(run_estimate_mode(regions, dataset_builder, map_builder))
     elif args.mode == "eval":
-        asyncio.run(run_eval_mode(region, dataset_builder, map_builder))
+        asyncio.run(run_eval_mode(regions, dataset_builder, map_builder))
     elif args.mode == "train_eval":
-        asyncio.run(run_train_eval_mode(region, dataset_builder, map_builder))
+        asyncio.run(run_train_eval_mode(regions, dataset_builder, map_builder))
     elif args.mode == "eval_show":
-        asyncio.run(run_eval_show_mode(region, dataset_builder, map_builder))
+        asyncio.run(run_eval_show_mode(regions, dataset_builder, map_builder))
     elif args.mode == "show_plots":
         _plot_all_training_results(None)
     else:

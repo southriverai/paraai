@@ -39,6 +39,19 @@ def get_bounding_box(region: str) -> BoundingBox:
     return bbox
 
 
+def get_bounding_box_union(regions: list[str]) -> BoundingBox:
+    """Return union BoundingBox encompassing all regions. Raises ValueError if any region unknown."""
+    if not regions:
+        raise ValueError("regions must be non-empty")
+    bboxes = [get_bounding_box(r.strip()) for r in regions]
+    return BoundingBox(
+        lat_min=min(b.lat_min for b in bboxes),
+        lat_max=max(b.lat_max for b in bboxes),
+        lon_min=min(b.lon_min for b in bboxes),
+        lon_max=max(b.lon_max for b in bboxes),
+    )
+
+
 def get_region_bounding_box(region_name: str) -> BoundingBoxRegion | None:
     return REGION_DICT.get(region_name.lower())
 

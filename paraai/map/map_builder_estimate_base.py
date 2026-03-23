@@ -148,3 +148,39 @@ class MapBuilderEstimateBase(MapBuilderBase):
             true_values=true_values,
             pred_values=pred_values,
         )
+
+    def evaluate_multi_bbox(
+        self,
+        bounding_boxes: list[BoundingBox],
+        evaluate_df: pd.DataFrame,
+        model_id: str,
+    ) -> MapEvaluateResult:
+        """Evaluate on held-out points across multiple bboxes. Groups points by bbox, runs inference per bbox."""
+        if len(evaluate_df) == 0:
+            raise ValueError("evaluate_df is empty")
+        if "lat" not in evaluate_df.columns or "lon" not in evaluate_df.columns or "strength" not in evaluate_df.columns:
+            raise ValueError("evaluate_df must have columns 'lat', 'lon', and 'strength'")
+
+        true_values = evaluate_df["strength"].to_numpy(dtype=np.float64)
+        pred_values = np.empty(len(evaluate_df), dtype=np.float64)
+        pred_values[:] = np.nan
+
+        for bbox in bounding_boxes:
+            mask = evaluate_df.apply(lambda r, b=bbox: b.is_in(r["lat"], r["lon"]), axis=1)
+            if not mask.any():
+                continue
+            subset = evaluate_df[mask]
+            indices = np.where(mask)[0]
+            pred_sub = self._run_inference_on_points(bbox, subset, model_id=model_id)
+            pred_values[indices] = pred_sub
+
+        if np.any(np.isnan(pred_values)):
+            raise ValueError("Some holdout points do not fall in any bounding box")
+        errors = np.abs(pred_values - true_values)
+        return MapEvaluateResult(
+            strength_mae=float(np.mean(errors)),
+            strength_rmse=float(np.sqrt(np.mean(errors**2))),
+            n_holdout=len(evaluate_df),
+            true_values=true_values,
+            pred_values=pred_values,
+        )
