@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 from abc import abstractmethod
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -97,8 +98,12 @@ class MapBuilderEstimateBase(MapBuilderBase):
         bounding_box: BoundingBox,
         df: pd.DataFrame | None = None,
         model_id: str | None = None,
+        **kwargs: Any,
     ) -> dict[str, VectorMapArray]:
         """Build strength map by loading model from repository and running inference."""
+        grid_stride = int(kwargs.pop("grid_stride", 16))
+        if kwargs:
+            raise TypeError(f"Unexpected keyword arguments for _build_impl: {set(kwargs)!r}")
         logger.info("Running inference on grid")
         if model_id is None:
             raise ValueError("model_id is required")
@@ -107,6 +112,7 @@ class MapBuilderEstimateBase(MapBuilderBase):
             inference_params={
                 "time_of_day_h": 12.0,
                 "time_of_year_d": 182.5,
+                "grid_stride": grid_stride,
             },
             model_id=model_id,
         )

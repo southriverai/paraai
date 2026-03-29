@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 import math
 
 import numpy as np
@@ -68,6 +69,7 @@ class MapBuilderFlatland(MapBuilderBase):
         bounding_box: BoundingBox,
         df: pd.DataFrame,
         model_id: str | None = None,
+        **kwargs: Any,
     ) -> dict[str, VectorMapArray]:
         """Build flatland map from DEM. Returns std (m) and planarity [0,1] within radius_m."""
         _ = df  # unused

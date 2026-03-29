@@ -92,18 +92,34 @@ class MapBuilderEstimateSimple(MapBuilderEstimateBase):
         model = model.to(device)
         model.eval()
 
-        patches = [
-            extract_elevation_patch(terrain["elevation"], terrain["transform"], float(lat), float(lon), patch_size_m, image_size)
-            for lat, lon in zip(df["lat"], df["lon"], strict=True)
-        ]
-        inp = torch.stack(patches).to(device)
-        td_t = torch.from_numpy(np.clip(df["time_of_day_h"].to_numpy() / 24.0, 0.0, 1.0).astype(np.float32)).to(device)
-        ty_t = torch.from_numpy(np.clip(df["time_of_year_d"].to_numpy() / 365.0, 0.0, 1.0).astype(np.float32)).to(device)
-        ga_t = torch.from_numpy(df["ground_alt_norm"].to_numpy().astype(np.float32)).to(device)
-
+        n = len(df)
+        bs = max(1, self.batch_size)
+        pred_chunks: list[np.ndarray] = []
         with torch.no_grad():
-            pred = self._model_forward(model, inp, td_t, ty_t, ga_t)
-        pred_np = pred.cpu().numpy().flatten()
+            for start in tqdm(
+                range(0, n, bs),
+                desc="Inference points",
+                unit="batch",
+                disable=n <= bs,
+            ):
+                sub = df.iloc[start : start + bs]
+                patches = [
+                    extract_elevation_patch(
+                        terrain["elevation"], terrain["transform"], float(lat), float(lon), patch_size_m, image_size
+                    )
+                    for lat, lon in zip(sub["lat"], sub["lon"], strict=True)
+                ]
+                inp = torch.stack(patches).to(device)
+                td_t = torch.from_numpy(
+                    np.clip(sub["time_of_day_h"].to_numpy() / 24.0, 0.0, 1.0).astype(np.float32)
+                ).to(device)
+                ty_t = torch.from_numpy(
+                    np.clip(sub["time_of_year_d"].to_numpy() / 365.0, 0.0, 1.0).astype(np.float32)
+                ).to(device)
+                ga_t = torch.from_numpy(sub["ground_alt_norm"].to_numpy().astype(np.float32)).to(device)
+                pred = self._model_forward(model, inp, td_t, ty_t, ga_t)
+                pred_chunks.append(pred.cpu().numpy().flatten())
+        pred_np = np.concatenate(pred_chunks)
         return np.clip(pred_np, 0, 1) * (strength_hi - strength_lo) + strength_lo
 
     def _run_inference_on_grid(
@@ -112,9 +128,10 @@ class MapBuilderEstimateSimple(MapBuilderEstimateBase):
         inference_params: dict,
         model_id: str,
     ) -> tuple[np.ndarray, rasterio.Affine]:
-        """Run model inference on grid. Returns (strength_array, transform)."""
+        """Run model inference on grid. inference_params may include time_of_day_h, time_of_year_d, grid_stride."""
         time_of_day_h = inference_params.get("time_of_day_h", 12.0)
         time_of_year_d = inference_params.get("time_of_year_d", 182.5)
+        stride = int(inference_params.get("grid_stride", 16))
         time_day_norm = float(np.clip(time_of_day_h / 24.0, 0.0, 1.0))
         time_year_norm = float(np.clip(time_of_year_d / 365.0, 0.0, 1.0))
 
@@ -143,7 +160,6 @@ class MapBuilderEstimateSimple(MapBuilderEstimateBase):
         elevation = terrain["elevation"]
         transform = terrain["transform"]
         h, w = elevation.shape
-        stride = model_data["grid_stride"]
         n_rows = (h + stride - 1) // stride
         n_cols = (w + stride - 1) // stride
         pred_sparse = np.zeros((n_rows, n_cols), dtype=np.float32)

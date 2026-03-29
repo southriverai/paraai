@@ -7,6 +7,7 @@ from typing import Optional
 
 import pandas as pd
 from srai_store.store_provider_base import StoreProviderBase
+from srai_store.store_provider_duckdb import StoreProviderDuckdb
 from srai_store.store_provider_sqlite import StoreProviderSqlite
 from tqdm import tqdm
 
@@ -37,6 +38,11 @@ class RepositorySimpleClimb:
     @staticmethod
     def initialize_sqlite(path_dir_database: Path) -> "RepositorySimpleClimb":
         store_provider = StoreProviderSqlite("simple_climb", path_dir_database)
+        return RepositorySimpleClimb.initialize(store_provider)
+
+    @staticmethod
+    def initialize_duckdb(path_dir_database: Path) -> "RepositorySimpleClimb":
+        store_provider = StoreProviderDuckdb("simple_climb", path_dir_database)
         return RepositorySimpleClimb.initialize(store_provider)
 
     @staticmethod

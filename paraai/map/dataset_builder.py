@@ -23,6 +23,7 @@ from tqdm import tqdm
 from paraai.model.boundingbox import BoundingBox
 from paraai.model.simple_climb import SimpleClimb
 from paraai.repository.repository_datasets import RepositoryDatasets
+from paraai.repository.repository_models import CANONICAL_GRID_STRIDE
 from paraai.repository.repository_simple_climb import RepositorySimpleClimb
 from paraai.repository.repository_terrain import RepositoryTerrain
 from paraai.tool_string import dict_to_cache_id, validate_safe_name
@@ -135,7 +136,6 @@ class DatasetBuilder:
         dataset_builder_type: Literal["climb", "centre", "flat_seed"],
         patch_size_m: float = 500.0,
         image_size: int = 64,
-        grid_stride: int = 16,
         test_frac: float = 0.2,
         split_seed: int = 42,
         dataset_limit: int = 300_000,
@@ -145,7 +145,7 @@ class DatasetBuilder:
         flat_seed_planarity_threshold: float = 0.5,
         flat_seed_stride: int = 16,
     ) -> None:
-        """Initialize DatasetBuilder with type, patch size, image size, grid stride, test fraction, and split seed.
+        """Initialize DatasetBuilder with type, patch size, image size, test fraction, and split seed.
         For flat_seed: flatland_radius_m, flat_seed_planarity_threshold (planarity > = flatland), flat_seed_stride (pixel stride for sampling).
         dataset_limit: max instances (train+test); excess is randomly sampled down."""
 
@@ -154,7 +154,6 @@ class DatasetBuilder:
         self.dataset_builder_type = dataset_builder_type
         self.patch_size_m = patch_size_m
         self.image_size = image_size
-        self.grid_stride = grid_stride
         self.test_frac = test_frac
         self.split_seed = split_seed
         self.dataset_limit = dataset_limit
@@ -170,7 +169,7 @@ class DatasetBuilder:
             dataset_builder_type=self.dataset_builder_type,
             patch_size_m=self.patch_size_m,
             image_size=self.image_size,
-            grid_stride=self.grid_stride,
+            grid_stride=CANONICAL_GRID_STRIDE,
             test_frac=self.test_frac,
             split_seed=self.split_seed,
             bboxes=[[b.lat_min, b.lat_max, b.lon_min, b.lon_max] for b in bbox_list],
@@ -790,7 +789,7 @@ class DatasetBuilder:
                 "strength_hi": train_result.strength_hi,
                 "image_size": self.image_size,
                 "patch_size_m": self.patch_size_m,
-                "grid_stride": self.grid_stride,
+                "grid_stride": CANONICAL_GRID_STRIDE,
                 "dataset_mode": self.dataset_builder_type,
                 "bounding_boxes": [b.model_dump() for b in bbox_list],
             },

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -27,6 +28,7 @@ class MapBuilderAverage(MapBuilderBase):
         bounding_box: BoundingBox,
         df: pd.DataFrame,
         model_id: str | None = None,
+        **kwargs: Any,
     ) -> dict[str, VectorMapArray]:
         """Build estimated climb map from DataFrame with columns lat and lon (and optionally count, strength)."""
         if "lat" not in df.columns or "lon" not in df.columns:

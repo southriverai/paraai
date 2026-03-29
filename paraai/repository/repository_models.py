@@ -10,6 +10,9 @@ import torch
 
 logger = logging.getLogger(__name__)
 
+# Stored in .pt files for backward compatibility only; not part of model identity. Grid inference stride comes from CLI.
+CANONICAL_GRID_STRIDE = 16
+
 
 class RepositoryModels:
     """Cache for map-builder models. Keyed by builder name and params."""
@@ -45,7 +48,6 @@ class RepositoryModels:
         out_channels: int,
         image_size: int,
         patch_size_m: float,
-        grid_stride: int,
         strength_lo: float,
         strength_hi: float,
     ) -> Path:
@@ -58,7 +60,7 @@ class RepositoryModels:
             "out_channels": out_channels,
             "image_size": image_size,
             "patch_size_m": patch_size_m,
-            "grid_stride": grid_stride,
+            "grid_stride": CANONICAL_GRID_STRIDE,
             "strength_lo": strength_lo,
             "strength_hi": strength_hi,
         }

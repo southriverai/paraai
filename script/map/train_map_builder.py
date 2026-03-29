@@ -334,7 +334,6 @@ async def run_train_mode(
                 out_channels=out_c,
                 image_size=meta["image_size"],
                 patch_size_m=meta["patch_size_m"],
-                grid_stride=meta["grid_stride"],
                 state_dict=model.state_dict(),
                 strength_lo=meta["strength_lo"],
                 strength_hi=meta["strength_hi"],
@@ -356,7 +355,6 @@ async def run_train_mode(
         out_channels=out_c,
         image_size=meta["image_size"],
         patch_size_m=meta["patch_size_m"],
-        grid_stride=meta["grid_stride"],
         state_dict=model.state_dict(),
         strength_lo=meta["strength_lo"],
         strength_hi=meta["strength_hi"],
@@ -453,6 +451,8 @@ async def run_estimate_mode(
     regions: list[str],
     dataset_builder: DatasetBuilder,
     map_builder: MapBuilderEstimateBase,
+    *,
+    grid_stride: int = 16,
 ) -> None:
     """Load trained model from RepositoryModels, run inference per region, cache strength map."""
 
@@ -465,7 +465,7 @@ async def run_estimate_mode(
         raise FileNotFoundError(f"Model not found in RepositoryModels for {map_builder.name}. Run train mode first.")
 
     for bbox in bounding_boxes:
-        map_builder.build(bbox, ignore_cache=True, model_id=model_id)
+        map_builder.build(bbox, ignore_cache=True, model_id=model_id, grid_stride=grid_stride)
     logger.info("Built and cached strength maps for %d regions", len(bounding_boxes))
 
 
@@ -538,6 +538,8 @@ async def run_eval_show_mode(
     regions: list[str],
     dataset_builder: DatasetBuilder,
     map_builder: MapBuilderEstimateBase,
+    *,
+    grid_stride: int = 16,
 ) -> None:
     """Evaluate MapBuilderEstimateNet on holdout data, print scores and show map chart. Shows first region."""
 
@@ -562,7 +564,7 @@ async def run_eval_show_mode(
     holdout_df = _climbs_to_eval_df(holdout_climbs)
     eval_result = map_builder.evaluate_multi_bbox(bounding_boxes, holdout_df, model_id=model_id)
     bbox_display = bounding_boxes[0]
-    maps = map_builder.build(bbox_display, ignore_cache=True, model_id=model_id)
+    maps = map_builder.build(bbox_display, ignore_cache=True, model_id=model_id, grid_stride=grid_stride)
     vma = maps["strength"]
     print("\n" + "=" * 60)
     print(f"Map evaluation (n_train={len(train_climbs)}, n_holdout={len(holdout_climbs)})")
@@ -620,7 +622,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--patch-size-m", type=float, default=500.0, help="Patch size in meters")
     parser.add_argument("--image-size", type=int, default=64, help="Patch resolution")
-    parser.add_argument("--grid-stride", type=int, default=16, help="Stride for sampling grid")
+    parser.add_argument(
+        "--grid-stride",
+        type=int,
+        default=16,
+        help="Pixel stride for CNN strength map inference (not part of dataset/model cache keys)",
+    )
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--test-frac", type=float, default=0.2, help="Fraction for test set")
@@ -655,7 +662,6 @@ def create_dataset_builder(
     *,
     patch_size_m: float = 500.0,
     image_size: int = 64,
-    grid_stride: int = 16,
     test_frac: float = 0.2,
     split_seed: int = 42,
     dataset_limit: int = 300_000,
@@ -668,7 +674,6 @@ def create_dataset_builder(
         dataset_builder_type=dataset_builder_type,
         patch_size_m=patch_size_m,
         image_size=image_size,
-        grid_stride=grid_stride,
         test_frac=test_frac,
         split_seed=split_seed,
         dataset_limit=dataset_limit,
@@ -707,7 +712,6 @@ if __name__ == "__main__":
         args.dataset_type,
         patch_size_m=args.patch_size_m,
         image_size=args.image_size,
-        grid_stride=args.grid_stride,
         test_frac=args.test_frac,
         split_seed=args.split_seed,
         dataset_limit=args.dataset_limit,
@@ -722,13 +726,13 @@ if __name__ == "__main__":
     elif args.mode == "train":
         asyncio.run(run_train_mode(regions, dataset_builder, map_builder))
     elif args.mode == "estimate":
-        asyncio.run(run_estimate_mode(regions, dataset_builder, map_builder))
+        asyncio.run(run_estimate_mode(regions, dataset_builder, map_builder, grid_stride=args.grid_stride))
     elif args.mode == "eval":
         asyncio.run(run_eval_mode(regions, dataset_builder, map_builder))
     elif args.mode == "train_eval":
         asyncio.run(run_train_eval_mode(regions, dataset_builder, map_builder))
     elif args.mode == "eval_show":
-        asyncio.run(run_eval_show_mode(regions, dataset_builder, map_builder))
+        asyncio.run(run_eval_show_mode(regions, dataset_builder, map_builder, grid_stride=args.grid_stride))
     elif args.mode == "show_plots":
         _plot_all_training_results(None)
     else:

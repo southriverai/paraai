@@ -6,6 +6,7 @@ import logging
 from abc import abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -57,6 +58,7 @@ class MapBuilderBase:
         *,
         ignore_cache: bool = False,
         model_id: str | None = None,
+        **kwargs: Any,
     ) -> dict[str, VectorMapArray]:
         """Build or load from cache. When ignore_cache=False, returns cached maps if available."""
         if not ignore_cache:
@@ -64,7 +66,7 @@ class MapBuilderBase:
             if maps is not None:
                 logger.info("Loaded %s maps from cache", self.name)
                 return maps
-        maps = self._build_impl(bounding_box, df, model_id=model_id)
+        maps = self._build_impl(bounding_box, df, model_id=model_id, **kwargs)
         self.save_maps(maps, bounding_box)
         return maps
 
@@ -92,6 +94,7 @@ class MapBuilderBase:
         bounding_box: BoundingBox,
         df: pd.DataFrame | None = None,
         model_id: str | None = None,
+        **kwargs: Any,
     ) -> dict[str, VectorMapArray]:
         """Build maps. Override in subclasses."""
         pass
